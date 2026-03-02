@@ -1,12 +1,16 @@
 import { useState } from "react";
-import { Search, Activity, Globe, FileText, Send } from "lucide-react";
+import { Search, Activity, Globe, FileText, Code, ShieldAlert, UserCircle, Info } from "lucide-react";
 import { ToolCard } from "@/components/ToolCard";
 import { TerminalOutput } from "@/components/TerminalOutput";
 import { 
   useSearchUsers, 
   usePingNetwork, 
   useFetchUrl, 
-  useReadLog 
+  useReadLog,
+  useDeserialize,
+  useUpdateProfile,
+  useGetDebugInfo,
+  useBypassAuth
 } from "@/hooks/use-tools";
 
 export default function Dashboard() {
@@ -15,12 +19,18 @@ export default function Dashboard() {
   const [pingHost, setPingHost] = useState("");
   const [fetchUrl, setFetchUrl] = useState("");
   const [logFile, setLogFile] = useState("");
+  const [configData, setConfigData] = useState("{ name: 'Internal' }");
+  const [userBio, setUserBio] = useState("<img src=x onerror=alert('XSS')>");
 
-  // Mutations
+  // Mutations/Queries
   const searchMutation = useSearchUsers();
   const pingMutation = usePingNetwork();
   const fetchMutation = useFetchUrl();
   const logMutation = useReadLog();
+  const deserializeMutation = useDeserialize();
+  const profileMutation = useUpdateProfile();
+  const debugInfo = useGetDebugInfo();
+  const authMutation = useBypassAuth();
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 md:py-12">
@@ -37,7 +47,7 @@ export default function Dashboard() {
         {/* User Search Tool */}
         <ToolCard
           title="Directory Search"
-          description="Query internal user database records."
+          description="Query internal user database records (SQLi)."
           icon={Search}
           delay={0.1}
         >
@@ -70,7 +80,7 @@ export default function Dashboard() {
         {/* Network Ping Tool */}
         <ToolCard
           title="Network Ping"
-          description="Send ICMP ECHO_REQUEST to network hosts."
+          description="Send ICMP ECHO_REQUEST to network hosts (Cmd Injection)."
           icon={Activity}
           delay={0.2}
         >
@@ -103,7 +113,7 @@ export default function Dashboard() {
         {/* URL Fetcher Tool */}
         <ToolCard
           title="Resource Fetcher"
-          description="Retrieve remote resources and endpoints."
+          description="Retrieve remote resources and endpoints (SSRF)."
           icon={Globe}
           delay={0.3}
         >
@@ -136,7 +146,7 @@ export default function Dashboard() {
         {/* Log Viewer Tool */}
         <ToolCard
           title="System Logs Viewer"
-          description="Read local system diagnostic files."
+          description="Read local system diagnostic files (Path Traversal)."
           icon={FileText}
           delay={0.4}
         >
@@ -163,6 +173,113 @@ export default function Dashboard() {
             isLoading={logMutation.isPending}
             error={logMutation.error?.message}
             content={logMutation.data?.content}
+          />
+        </ToolCard>
+
+        {/* Insecure Deserialization */}
+        <ToolCard
+          title="Config Parser"
+          description="Update application configuration via JS object string (Insecure Deserialization)."
+          icon={Code}
+          delay={0.5}
+        >
+          <form 
+            onSubmit={(e) => { e.preventDefault(); deserializeMutation.mutate(configData); }}
+            className="flex flex-col gap-2"
+          >
+            <textarea
+              value={configData}
+              onChange={(e) => setConfigData(e.target.value)}
+              rows={2}
+              className="w-full bg-input text-foreground border-border rounded-lg px-4 py-2 text-sm font-mono glow-focus"
+            />
+            <button
+              type="submit"
+              disabled={deserializeMutation.isPending}
+              className="bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-lg font-medium transition-all"
+            >
+              Parse Config
+            </button>
+          </form>
+          <TerminalOutput 
+            isLoading={deserializeMutation.isPending}
+            error={deserializeMutation.error?.message}
+            content={deserializeMutation.data}
+          />
+        </ToolCard>
+
+        {/* Broken Auth */}
+        <ToolCard
+          title="Admin Panel Stats"
+          description="View privileged system statistics (Broken Auth)."
+          icon={ShieldAlert}
+          delay={0.6}
+        >
+          <button
+            onClick={() => authMutation.mutate()}
+            disabled={authMutation.isPending}
+            className="w-full bg-destructive text-destructive-foreground hover:bg-destructive/90 px-4 py-2 rounded-lg font-medium transition-all"
+          >
+            Fetch Sensitive Stats
+          </button>
+          <TerminalOutput 
+            isLoading={authMutation.isPending}
+            error={authMutation.error?.message}
+            content={authMutation.data}
+          />
+        </ToolCard>
+
+        {/* XSS Profile Tool */}
+        <ToolCard
+          title="Profile Update"
+          description="Update your user profile bio (Reflected XSS)."
+          icon={UserCircle}
+          delay={0.7}
+        >
+          <form 
+            onSubmit={(e) => { e.preventDefault(); profileMutation.mutate(userBio); }}
+            className="flex gap-2"
+          >
+            <input
+              type="text"
+              value={userBio}
+              onChange={(e) => setUserBio(e.target.value)}
+              className="flex-1 bg-input text-foreground border-border rounded-lg px-4 py-2 text-sm font-mono glow-focus"
+            />
+            <button
+              type="submit"
+              disabled={profileMutation.isPending}
+              className="bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-lg font-medium"
+            >
+              Update
+            </button>
+          </form>
+          <TerminalOutput 
+            isLoading={profileMutation.isPending}
+            error={profileMutation.error?.message}
+            content={profileMutation.data?.message}
+            rawHTML={true}
+          />
+        </ToolCard>
+
+        {/* Information Exposure */}
+        <ToolCard
+          title="Debug Info"
+          description="Dump system environment information (Info Exposure)."
+          icon={Info}
+          delay={0.8}
+        >
+          <button
+            onClick={() => debugInfo.refetch()}
+            disabled={debugInfo.isFetching}
+            className="w-full bg-secondary text-secondary-foreground hover:bg-secondary/90 px-4 py-2 rounded-lg font-medium transition-all"
+          >
+            Load Debug Context
+          </button>
+          <TerminalOutput 
+            isLoading={debugInfo.isFetching}
+            error={debugInfo.error?.message}
+            content={debugInfo.data}
           />
         </ToolCard>
       </div>

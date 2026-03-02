@@ -52,11 +52,15 @@ export async function registerRoutes(
     fs.writeFileSync(path.join(logsDir, "access.log"), "User admin logged in from 10.0.0.5\nUser jdoe failed login from 10.0.0.12\n");
   }
 
+  // HARDCODED SECRETS
+  const AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE";
+  const AWS_SECRET_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+  const STRIPE_KEY = "sk_test_4eC39HqLyjWDarjtT1zdp7dc";
+
   // 1. SQL Injection (Search Users)
   app.get(api.tools.searchUsers.path, async (req, res) => {
     const query = req.query.query as string || "";
     try {
-      // Intentionally insecure SQLi via storage
       const results = await storage.searchUsersVulnerable(query);
       res.json(results);
     } catch (e: any) {
@@ -70,8 +74,6 @@ export async function registerRoutes(
     if (!host) {
       return res.status(400).json({ message: "Host required" });
     }
-
-    // VULNERABLE: Direct concatenation in exec
     const command = `ping -c 1 ${host}`;
     exec(command, (error, stdout, stderr) => {
       if (error) {
@@ -87,8 +89,6 @@ export async function registerRoutes(
     if (!url) {
       return res.status(400).json({ message: "URL required" });
     }
-
-    // VULNERABLE: No validation of URL scheme/host, allows internal requests
     try {
       const response = await axios.get(url);
       res.json({ data: typeof response.data === 'string' ? response.data : JSON.stringify(response.data).substring(0, 1000) });
@@ -103,16 +103,55 @@ export async function registerRoutes(
     if (!filename) {
       return res.status(400).json({ message: "Filename required" });
     }
-
-    // VULNERABLE: Direct path joining without validation
     const filePath = path.join(process.cwd(), "logs", filename);
-    
     try {
       const content = fs.readFileSync(filePath, 'utf8');
       res.json({ content });
     } catch (e: any) {
       res.status(500).json({ message: "Error reading file: " + e.message });
     }
+  });
+
+  // 5. Insecure Deserialization (Unsafe JSON parse/eval-like behavior)
+  app.post(api.tools.deserialize.path, (req, res) => {
+    const { data } = req.body;
+    try {
+      // VULNERABLE: Using eval to "parse" configuration strings
+      const result = eval("(" + data + ")");
+      res.json({ result });
+    } catch (e: any) {
+      res.status(500).json({ message: "Deserialization Error: " + e.message });
+    }
+  });
+
+  // 6. Broken Auth (Weak check, bypassable)
+  app.get(api.tools.bypassAuth.path, (req, res) => {
+    const isAdmin = req.headers['x-admin-bypass'] === 'true';
+    if (!isAdmin) {
+      return res.status(401).json({ message: "Unauthorized. Admin bypass header missing." });
+    }
+    res.json({ stats: { users: 3, uptime: "99.9%", secrets_exposed: true } });
+  });
+
+  // 7. XSS (Reflected in Profile Update)
+  app.post(api.tools.updateProfile.path, (req, res) => {
+    const { bio } = req.body;
+    // VULNERABLE: Sending back unescaped input that will be rendered directly
+    res.json({ message: `Profile updated successfully! New bio: ${bio}` });
+  });
+
+  // 8. Debug Info (Information Exposure)
+  app.get(api.tools.debugInfo.path, (req, res) => {
+    // VULNERABLE: Exposing sensitive environment variables
+    res.json({ 
+      env: {
+        AWS_ACCESS_KEY,
+        AWS_SECRET_KEY,
+        STRIPE_KEY,
+        DB_URL: process.env.DATABASE_URL,
+        NODE_ENV: process.env.NODE_ENV
+      }
+    });
   });
 
   return httpServer;

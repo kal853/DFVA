@@ -12,9 +12,10 @@ interface TerminalOutputProps {
   error?: string | null;
   isLoading?: boolean;
   className?: string;
+  rawHTML?: boolean;
 }
 
-export function TerminalOutput({ content, error, isLoading, className }: TerminalOutputProps) {
+export function TerminalOutput({ content, error, isLoading, className, rawHTML }: TerminalOutputProps) {
   const formatContent = (data: any) => {
     if (typeof data === "string") return data;
     try {
@@ -80,7 +81,11 @@ export function TerminalOutput({ content, error, isLoading, className }: Termina
               animate={{ opacity: 1 }}
               className="text-primary/90 whitespace-pre-wrap break-all"
             >
-              {formatContent(content)}
+              {rawHTML ? (
+                <div dangerouslySetInnerHTML={{ __html: formatContent(content) }} />
+              ) : (
+                formatContent(content)
+              )}
               <span className="inline-block w-2 h-4 bg-primary ml-1 animate-blink align-middle" />
             </motion.div>
           ) : (

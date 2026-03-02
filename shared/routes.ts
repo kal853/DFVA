@@ -43,6 +43,41 @@ export const api = {
         500: errorSchemas.internal,
       },
     },
+    // New vulnerabilities
+    deserialize: {
+      method: 'POST' as const,
+      path: '/api/admin/config' as const,
+      input: z.object({ data: z.string() }),
+      responses: {
+        200: z.object({ result: z.any() }),
+        500: errorSchemas.internal,
+      },
+    },
+    updateProfile: {
+      method: 'POST' as const,
+      path: '/api/profile/update' as const,
+      input: z.object({ bio: z.string() }),
+      responses: {
+        200: z.object({ message: z.string() }),
+        500: errorSchemas.internal,
+      },
+    },
+    debugInfo: {
+      method: 'GET' as const,
+      path: '/api/debug' as const,
+      responses: {
+        200: z.object({ env: z.any() }),
+        500: errorSchemas.internal,
+      },
+    },
+    bypassAuth: {
+      method: 'GET' as const,
+      path: '/api/admin/stats' as const,
+      responses: {
+        200: z.object({ stats: z.any() }),
+        401: z.object({ message: z.string() }),
+      },
+    }
   },
 };
 
