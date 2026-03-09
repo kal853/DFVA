@@ -43,7 +43,6 @@ export const api = {
         500: errorSchemas.internal,
       },
     },
-    // New vulnerabilities
     deserialize: {
       method: 'POST' as const,
       path: '/api/admin/config' as const,
@@ -77,7 +76,58 @@ export const api = {
         200: z.object({ stats: z.any() }),
         401: z.object({ message: z.string() }),
       },
-    }
+    },
+    // New vulnerabilities
+    viewInvoice: {
+      method: 'GET' as const,
+      path: '/api/invoice/:id' as const,
+      responses: {
+        200: z.object({ id: z.number(), amount: z.string(), status: z.string() }),
+        404: errorSchemas.internal,
+      },
+    },
+    deactivateUser: {
+      method: 'POST' as const,
+      path: '/api/admin/deactivate' as const,
+      input: z.object({ userId: z.number() }),
+      responses: {
+        200: z.object({ message: z.string() }),
+        500: errorSchemas.internal,
+      },
+    },
+    redirect: {
+      method: 'GET' as const,
+      path: '/api/redirect' as const,
+      responses: {
+        302: z.object({ location: z.string() }),
+        400: errorSchemas.internal,
+      },
+    },
+    calculateDiscount: {
+      method: 'POST' as const,
+      path: '/api/checkout/discount' as const,
+      input: z.object({ baseAmount: z.number(), coupons: z.array(z.string()) }),
+      responses: {
+        200: z.object({ finalAmount: z.number(), breakdown: z.any() }),
+        500: errorSchemas.internal,
+      },
+    },
+    randomToken: {
+      method: 'GET' as const,
+      path: '/api/generate-token' as const,
+      responses: {
+        200: z.object({ token: z.string() }),
+      },
+    },
+    processFile: {
+      method: 'POST' as const,
+      path: '/api/process-file' as const,
+      input: z.object({ filename: z.string(), operations: z.array(z.any()) }),
+      responses: {
+        200: z.object({ result: z.string() }),
+        500: errorSchemas.internal,
+      },
+    },
   },
 };
 

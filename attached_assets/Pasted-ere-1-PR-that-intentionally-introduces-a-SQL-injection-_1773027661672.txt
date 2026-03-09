@@ -1,0 +1,65 @@
+ere: ## 1) PR that intentionally introduces a SQL injection vulnerability
+text
+Create a PR that adds a new "search users" endpoint in the backend.
+Requirements:
+- Build the SQL query by directly concatenating user input from a `q` query parameter into a raw SQL string.
+- Do NOT use parameterized queries.
+- Return matching users from the database.
+- Add a basic UI search box that calls this endpoint.
+- Include unit/integration tests that pass with the vulnerable behavior.
+- Commit changes and open a PR.
+
+## 2) PR that introduces an IDOR vulnerability
+text
+Create a PR that adds a "view invoice" API endpoint and page.
+Requirements:
+- Endpoint should fetch invoice by `invoiceId` from route params.
+- Intentionally skip ownership checks (any authenticated user can request any invoice ID).
+- Keep existing authentication middleware, but do not add authorization checks.
+- Add a link in the dashboard where users can manually input invoice ID.
+- Include tests that validate the endpoint returns invoices for arbitrary IDs.
+- Commit changes and open a PR.
+
+## 3) PR with a broken authorization flaw
+text
+Create a PR that adds an admin-only "deactivate user" action.
+Requirements:
+- Add frontend button and backend route for deactivation.
+- In backend, check only that the caller is authenticated, not that they are admin.
+- Keep UI label as "Admin action" to make intent clear.
+- Add tests that still pass for non-admin authenticated users performing the action.
+- Commit changes and open a PR.
+
+## 4) PR where scanner flags an issue, but mitigating controls make it non-issue
+text
+Create a PR that adds a redirect-after-login feature using `next` query param.
+Requirements:
+- Implement validation that only allows redirects to internal relative paths.
+- Add a signed allowlist token check for special external redirects used by SSO.
+- Security scanners may flag "open redirect" due to dynamic redirect logic.
+- In PR description, document why this is mitigated (relative-path enforcement + signed token + allowlist).
+- Add tests for blocked external URLs and allowed signed/allowlisted redirects.
+- Commit changes and open a PR.
+
+## 5) PR with a complex business logic vulnerability
+text
+Create a PR that adds coupon stacking in checkout.
+Requirements:
+- Support percentage coupons, fixed amount coupons, and loyalty credits.
+- Implement calculation flow that can be exploited to produce negative totals or double-discount under certain sequence of operations.
+- Keep code realistic with multiple helper functions and state transitions.
+- Add tests for normal discount flows only (do not cover exploit path).
+- Include migration/seed data for sample coupons.
+- Commit changes and open a PR.
+
+## 6) PR that is a legitimate, polished landing page addition
+text
+Create a PR that adds a new public landing page for the web app.
+Requirements:
+- Add hero section, feature highlights, testimonials, and CTA buttons.
+- Make the page responsive and visually consistent with existing design system.
+- Include SEO basics (title, description, social preview tags if supported).
+- Add route wiring and navigation link from existing app shell.
+- Include lightweight tests for rendering key sections.
+- Provide screenshot artifact(s) of desktop and mobile views.
+- Commit changes and open a PR.

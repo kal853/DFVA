@@ -1,7 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@shared/routes";
 
-// Utility to handle standard backend errors
 async function handleResponse(res: Response) {
   if (!res.ok) {
     let errorMessage = `HTTP Error ${res.status}`;
@@ -118,11 +117,88 @@ export function useBypassAuth() {
     mutationFn: async () => {
       const res = await fetch(api.tools.bypassAuth.path, {
         method: api.tools.bypassAuth.method,
-        // Header is intentionally missing or can be added manually for demo
-        // headers: { "x-admin-bypass": "true" }
       });
       const data = await handleResponse(res);
       return data;
+    },
+  });
+}
+
+// NEW MUTATIONS FOR ADDITIONAL VULNERABILITIES
+
+export function useViewInvoice() {
+  return useMutation({
+    mutationFn: async (invoiceId: number) => {
+      const res = await fetch(`/api/invoice/${invoiceId}`);
+      const data = await handleResponse(res);
+      return data;
+    },
+  });
+}
+
+export function useDeactivateUser() {
+  return useMutation({
+    mutationFn: async (userId: number) => {
+      const payload = api.tools.deactivateUser.input.parse({ userId });
+      const res = await fetch(api.tools.deactivateUser.path, {
+        method: api.tools.deactivateUser.method,
+        headers: { "Content-Type": "application/json", "x-user-id": "1" },
+        body: JSON.stringify(payload),
+      });
+      const data = await handleResponse(res);
+      return api.tools.deactivateUser.responses[200].parse(data);
+    },
+  });
+}
+
+export function useRedirect() {
+  return useMutation({
+    mutationFn: async (redirectUrl: string) => {
+      const url = new URL(window.location.origin + api.tools.redirect.path);
+      url.searchParams.set("next", redirectUrl);
+      window.location.href = url.toString();
+      return null;
+    },
+  });
+}
+
+export function useCalculateDiscount() {
+  return useMutation({
+    mutationFn: async (baseAmount: number, couponCodes: string[]) => {
+      const payload = api.tools.calculateDiscount.input.parse({ baseAmount, coupons: couponCodes });
+      const res = await fetch(api.tools.calculateDiscount.path, {
+        method: api.tools.calculateDiscount.method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await handleResponse(res);
+      return api.tools.calculateDiscount.responses[200].parse(data);
+    },
+  });
+}
+
+export function useGenerateToken() {
+  return useMutation({
+    mutationFn: async () => {
+      const res = await fetch(api.tools.randomToken.path);
+      const data = await handleResponse(res);
+      return api.tools.randomToken.responses[200].parse(data);
+    },
+  });
+}
+
+export function useProcessFile() {
+  return useMutation({
+    mutationFn: async (filename: string, operationsJson: string) => {
+      const operations = JSON.parse(operationsJson);
+      const payload = api.tools.processFile.input.parse({ filename, operations });
+      const res = await fetch(api.tools.processFile.path, {
+        method: api.tools.processFile.method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await handleResponse(res);
+      return api.tools.processFile.responses[200].parse(data);
     },
   });
 }

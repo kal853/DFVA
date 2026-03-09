@@ -1,5 +1,5 @@
 import { db, pool } from "./db";
-import { users, posts, type User, type InsertUser, type Post, type InsertPost } from "@shared/schema";
+import { users, posts, invoices, coupons, type User, type InsertUser, type Post, type InsertPost, type Invoice, type InsertInvoice, type Coupon, type InsertCoupon } from "@shared/schema";
 import { eq } from "drizzle-orm";
 
 export interface IStorage {
@@ -8,6 +8,11 @@ export interface IStorage {
   createUser(user: InsertUser): Promise<User>;
   createPost(post: InsertPost): Promise<Post>;
   searchUsersVulnerable(query: string): Promise<any[]>;
+  getInvoice(id: number): Promise<Invoice | undefined>;
+  createInvoice(invoice: InsertInvoice): Promise<Invoice>;
+  deactivateUser(id: number): Promise<User>;
+  getCoupon(code: string): Promise<Coupon | undefined>;
+  getAllCoupons(): Promise<Coupon[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -31,16 +36,37 @@ export class DatabaseStorage implements IStorage {
     return post;
   }
 
+  async getInvoice(id: number): Promise<Invoice | undefined> {
+    const [invoice] = await db.select().from(invoices).where(eq(invoices.id, id));
+    return invoice;
+  }
+
+  async createInvoice(insertInvoice: InsertInvoice): Promise<Invoice> {
+    const [invoice] = await db.insert(invoices).values(insertInvoice).returning();
+    return invoice;
+  }
+
+  async deactivateUser(id: number): Promise<User> {
+    const [user] = await db.update(users).set({ isActive: false }).where(eq(users.id, id)).returning();
+    return user;
+  }
+
+  async getCoupon(code: string): Promise<Coupon | undefined> {
+    const [coupon] = await db.select().from(coupons).where(eq(coupons.code, code));
+    return coupon;
+  }
+
+  async getAllCoupons(): Promise<Coupon[]> {
+    return await db.select().from(coupons);
+  }
+
   // VULNERABLE to SQL Injection
   async searchUsersVulnerable(query: string): Promise<any[]> {
-    // Deliberately concatenating user input directly into the query
     const sqlQuery = `SELECT id, username, role FROM users WHERE username LIKE '%${query}%'`;
     try {
       const res = await pool.query(sqlQuery);
       return res.rows;
     } catch (e: any) {
-      console.error(e);
-      // Return the error to the user to make SQLi exploitation easier for demo
       throw new Error(e.message);
     }
   }
