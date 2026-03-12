@@ -1,6 +1,11 @@
 import { db, pool } from "./db";
-import { users, posts, invoices, coupons, type User, type InsertUser, type Post, type InsertPost, type Invoice, type InsertInvoice, type Coupon, type InsertCoupon } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import {
+  users, posts, invoices, coupons, walletTransactions,
+  type User, type InsertUser, type Post, type InsertPost,
+  type Invoice, type Coupon, type WalletTransaction,
+  type PlanKey, PLANS
+} from "@shared/schema";
+import { eq, sql } from "drizzle-orm";
 
 export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
@@ -9,10 +14,16 @@ export interface IStorage {
   createPost(post: InsertPost): Promise<Post>;
   searchUsersVulnerable(query: string): Promise<any[]>;
   getInvoice(id: number): Promise<Invoice | undefined>;
-  createInvoice(invoice: InsertInvoice): Promise<Invoice>;
+  createInvoice(data: { userId: number; amount: string; status?: string }): Promise<Invoice>;
   deactivateUser(id: number): Promise<User>;
   getCoupon(code: string): Promise<Coupon | undefined>;
-  getAllCoupons(): Promise<Coupon[]>;
+  // Billing
+  getUserWallet(userId: number): Promise<{ balance: number; plan: string; planStartDate: Date | null }>;
+  topupWallet(userId: number, amount: number): Promise<User>;
+  deductWallet(userId: number, amount: number): Promise<User>;
+  creditWallet(userId: number, amount: number, description: string): Promise<User>;
+  setPlan(userId: number, plan: PlanKey): Promise<User>;
+  logWalletTransaction(userId: number, amount: number, type: string, description: string): Promise<WalletTransaction>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -30,7 +41,7 @@ export class DatabaseStorage implements IStorage {
     const [user] = await db.insert(users).values(insertUser).returning();
     return user;
   }
-  
+
   async createPost(insertPost: InsertPost): Promise<Post> {
     const [post] = await db.insert(posts).values(insertPost).returning();
     return post;
@@ -41,8 +52,8 @@ export class DatabaseStorage implements IStorage {
     return invoice;
   }
 
-  async createInvoice(insertInvoice: InsertInvoice): Promise<Invoice> {
-    const [invoice] = await db.insert(invoices).values(insertInvoice).returning();
+  async createInvoice(data: { userId: number; amount: string; status?: string }): Promise<Invoice> {
+    const [invoice] = await db.insert(invoices).values({ userId: data.userId, amount: data.amount, status: data.status ?? "unpaid" }).returning();
     return invoice;
   }
 
@@ -56,8 +67,58 @@ export class DatabaseStorage implements IStorage {
     return coupon;
   }
 
-  async getAllCoupons(): Promise<Coupon[]> {
-    return await db.select().from(coupons);
+  async getUserWallet(userId: number): Promise<{ balance: number; plan: string; planStartDate: Date | null }> {
+    const user = await this.getUser(userId);
+    if (!user) throw new Error("User not found");
+    return {
+      balance: parseFloat(user.walletBalance),
+      plan: user.plan,
+      planStartDate: user.planStartDate,
+    };
+  }
+
+  async topupWallet(userId: number, amount: number): Promise<User> {
+    const [user] = await db.update(users)
+      .set({ walletBalance: sql`wallet_balance + ${amount}` })
+      .where(eq(users.id, userId))
+      .returning();
+    return user;
+  }
+
+  // VULNERABLE: No row lock or transaction — race condition exploitable
+  async deductWallet(userId: number, amount: number): Promise<User> {
+    const user = await this.getUser(userId);
+    if (!user) throw new Error("User not found");
+    const current = parseFloat(user.walletBalance);
+    // No floor check — can go negative
+    const newBalance = current - amount;
+    const [updated] = await db.update(users)
+      .set({ walletBalance: newBalance.toFixed(2) })
+      .where(eq(users.id, userId))
+      .returning();
+    return updated;
+  }
+
+  async creditWallet(userId: number, amount: number, description: string): Promise<User> {
+    const [user] = await db.update(users)
+      .set({ walletBalance: sql`wallet_balance + ${amount}` })
+      .where(eq(users.id, userId))
+      .returning();
+    await this.logWalletTransaction(userId, amount, "credit", description);
+    return user;
+  }
+
+  async setPlan(userId: number, plan: PlanKey): Promise<User> {
+    const [user] = await db.update(users)
+      .set({ plan, planStartDate: new Date() })
+      .where(eq(users.id, userId))
+      .returning();
+    return user;
+  }
+
+  async logWalletTransaction(userId: number, amount: number, type: string, description: string): Promise<WalletTransaction> {
+    const [tx] = await db.insert(walletTransactions).values({ userId, amount: amount.toFixed(2), type, description }).returning();
+    return tx;
   }
 
   // VULNERABLE to SQL Injection
