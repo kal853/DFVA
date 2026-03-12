@@ -14,6 +14,23 @@ export const users = pgTable("users", {
   planStartDate: timestamp("plan_start_date").defaultNow(),
 });
 
+export const products = pgTable("products", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  slug: text("slug").notNull().unique(),
+  description: text("description").notNull(),
+  longDescription: text("long_description"),
+  price: decimal("price", { precision: 10, scale: 2 }).notNull(),
+  category: text("category").notNull(),
+  badge: text("badge"),
+  stock: integer("stock").default(100),
+  rating: decimal("rating", { precision: 3, scale: 1 }).default("4.5"),
+  reviewCount: integer("review_count").default(0),
+  featured: boolean("featured").default(false),
+  specs: text("specs"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
 export const posts = pgTable("posts", {
   id: serial("id").primaryKey(),
   title: text("title").notNull(),
@@ -49,13 +66,15 @@ export const walletTransactions = pgTable("wallet_transactions", {
 });
 
 export const insertUserSchema = createInsertSchema(users).omit({ id: true });
+export const insertProductSchema = createInsertSchema(products).omit({ id: true, createdAt: true });
 export const insertPostSchema = createInsertSchema(posts).omit({ id: true, createdAt: true });
 export const insertInvoiceSchema = createInsertSchema(invoices).omit({ id: true, createdAt: true });
-export const insertCouponSchema = createInsertSchema(coupons).omit({ id: true, timesUsed: true });
 export const insertWalletTxSchema = createInsertSchema(walletTransactions).omit({ id: true, createdAt: true });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
+export type Product = typeof products.$inferSelect;
+export type InsertProduct = z.infer<typeof insertProductSchema>;
 export type InsertPost = z.infer<typeof insertPostSchema>;
 export type Post = typeof posts.$inferSelect;
 export type Invoice = typeof invoices.$inferSelect;
@@ -63,9 +82,9 @@ export type Coupon = typeof coupons.$inferSelect;
 export type WalletTransaction = typeof walletTransactions.$inferSelect;
 
 export const PLANS = {
-  free:       { name: "Free",       price: 0,   color: "muted" },
-  pro:        { name: "Pro",        price: 49,  color: "primary" },
-  enterprise: { name: "Enterprise", price: 199, color: "accent" },
+  free:       { name: "Explorer",    price: 0,   perks: "Standard shipping, 30-day returns" },
+  pro:        { name: "Member",      price: 9,   perks: "Free shipping, priority support, 5% off" },
+  enterprise: { name: "Elite",       price: 29,  perks: "Free express shipping, 15% off, early access" },
 } as const;
 
 export type PlanKey = keyof typeof PLANS;
