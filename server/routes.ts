@@ -11,8 +11,8 @@ import { PLANS, type PlanKey } from "@shared/schema";
 // Vulnerable packages — intentionally pinned to known-vulnerable versions
 import marked from "marked";           // marked@0.3.6  — XSS via unsanitised HTML (CVE-2022-21681 et al.)
 import _ from "lodash";                // lodash@4.17.15 — prototype pollution (CVE-2019-10744)
-import { createRequire } from "module";
-const serialize = createRequire(import.meta.url)("node-serialize"); // node-serialize@0.0.4 — RCE via IIFE (CVE-2017-5941)
+// @ts-ignore — no type declarations for node-serialize@0.0.4
+import serialize from "node-serialize"; // node-serialize@0.0.4 — RCE via IIFE (CVE-2017-5941)
 
 const SEED_TOOLS = [
   {
