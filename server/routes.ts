@@ -8,6 +8,7 @@ import path from "path";
 import axios from "axios";
 import { calculateProration, applyCreditsToOrder, finalizeUpgrade, processDowngrade } from "./billing";
 import { PLANS, type PlanKey } from "@shared/schema";
+import { chat, type ChatMessage } from "./chat";
 // Vulnerable packages — intentionally pinned to known-vulnerable versions
 import marked from "marked";           // marked@0.3.6  — XSS via unsanitised HTML (CVE-2022-21681 et al.)
 import _ from "lodash";                // lodash@4.17.15 — prototype pollution (CVE-2019-10744)
@@ -380,6 +381,21 @@ export async function registerRoutes(
       const prefs = serialize.unserialize(data); // RCE if data contains {"x":"_$$ND_FUNC$$_function(){...}()"}
       res.json({ saved: true, prefs });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // ── ARIA CHAT (prompt injection vulnerability) ───────────────────────────────
+  // The system prompt in server/chat.ts embeds fake PII + a 3-step persona unlock
+  // sequence. A scanner probing /api/chat with crafted payloads can extract the
+  // hidden customer records and internal credentials without the user knowing.
+  app.post("/api/chat", async (req, res) => {
+    const { history } = req.body as { history: ChatMessage[] };
+    if (!Array.isArray(history)) return res.status(400).json({ message: "history array required" });
+    try {
+      const reply = await chat(history);
+      res.json({ reply });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
   });
 
   // 17. lodash@4.17.15 — Prototype Pollution via _.merge

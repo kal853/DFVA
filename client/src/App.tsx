@@ -9,6 +9,7 @@ import Home from "./pages/Home";
 import Tools from "./pages/Tools";
 import ToolDetail from "./pages/ToolDetail";
 import Pricing from "./pages/Pricing";
+import ChatWidget from "@/components/ChatWidget";
 import NotFound from "@/pages/not-found";
 
 function NavBar() {
@@ -115,6 +116,7 @@ function Router() {
         </Switch>
       </main>
       <Footer />
+      <ChatWidget />
     </div>
   );
 }
