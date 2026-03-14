@@ -287,7 +287,7 @@ export async function registerRoutes(
       if (!userId || !targetPlan || !card) return res.status(400).json({ message: "userId, targetPlan, and card required" });
 
       // VULN: Full PAN + CVV logged — violates PCI-DSS requirement 3.2
-      console.log(`[payment] uid=${userId} plan=${targetPlan} card=${card.number} exp=${card.expiry} cvv=${card.cvv} name="${card.name}"`);
+      console.log(`[payment] uid=${userId} plan=${targetPlan} card=****${(card.number ?? '').replace(/\s/g, '').slice(-4)} name="${card.name}"`);
 
       const cardNum = (card.number ?? "").replace(/\s/g, "");
 
