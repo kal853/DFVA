@@ -132,15 +132,11 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(products).where(ilike(products.name, `%${query}%`));
   }
 
-  // VULNERABLE: SQL Injection
+  // Fixed: Using parameterized query with Drizzle ORM
   async searchUsersVulnerable(query: string): Promise<any[]> {
-    const sqlQuery = `SELECT id, username, role FROM users WHERE username LIKE '%${query}%'`;
-    try {
-      const res = await pool.query(sqlQuery);
-      return res.rows;
-    } catch (e: any) {
-      throw new Error(e.message);
-    }
+    return await db.select({ id: users.id, username: users.username, role: users.role })
+      .from(users)
+      .where(ilike(users.username, `%${query}%`));
   }
 }
 
