@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import {
   Check, ArrowUp, ArrowDown, Wallet, Loader2, Shield, Zap, Star,
   AlertTriangle, X
@@ -85,6 +86,13 @@ export default function Pricing() {
   const { toast } = useToast();
   const qc = useQueryClient();
   const { user, refreshUser } = useSession();
+  const [, navigate] = useLocation();
+
+  useEffect(() => {
+    if (!user) navigate("/login");
+  }, [user]);
+
+  if (!user) return null;
 
   const [paymentTarget, setPaymentTarget] = useState<{ plan: string; price: number } | null>(null);
   const [downgradeTarget, setDowngradeTarget] = useState<string | null>(null);

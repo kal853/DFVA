@@ -255,6 +255,29 @@ export async function registerRoutes(
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
+  // ── AUTH ─────────────────────────────────────────────────────────────────────
+  // VULN: Plaintext password comparison (no hashing).
+  // VULN: User enumeration — distinct messages for "no such user" vs "wrong password".
+  // VULN: No rate limiting — unlimited brute-force attempts permitted.
+  app.post("/api/auth/login", async (req, res) => {
+    try {
+      const { username, password } = req.body;
+      if (!username || !password) return res.status(400).json({ message: "Username and password are required." });
+
+      const user = await storage.getUserByUsername(username);
+      // VULN: Different messages reveal account existence
+      if (!user) return res.status(401).json({ message: "No account found with that username." });
+      if (user.password !== password) return res.status(401).json({ message: "Incorrect password." });
+
+      // VULN: No session token issued — auth state lives only in client localStorage
+      res.json({ id: user.id, username: user.username, plan: user.plan, walletBalance: user.walletBalance, role: user.role });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  app.post("/api/auth/logout", (_req, res) => {
+    res.json({ message: "Logged out." });
+  });
+
   // ── PAYMENT ENDPOINT ─────────────────────────────────────────────────────────
   // VULN #22: PAN data (full card number + CVV) written to server logs.
   // Any log aggregator, SIEM, or /var/log reader will capture raw card data.

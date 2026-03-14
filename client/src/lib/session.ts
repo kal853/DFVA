@@ -7,22 +7,19 @@ export type SessionUser = {
   walletBalance: string;
 };
 
-// Demo accounts — exposed by username/plan only, never by ID
-export const DEMO_ACCOUNTS: SessionUser[] = [
-  { id: 2, username: "jdoe",   plan: "pro",        walletBalance: "50.00" },
-  { id: 3, username: "asmith", plan: "free",       walletBalance: "0.00"  },
-  { id: 1, username: "admin",  plan: "enterprise", walletBalance: "0.00"  },
-];
-
 export type SessionCtx = {
-  user: SessionUser;
-  setUser: (u: SessionUser) => void;
+  user: SessionUser | null;
+  isLoggedIn: boolean;
+  login: (username: string, password: string) => Promise<void>;
+  logout: () => void;
   refreshUser: () => Promise<void>;
 };
 
 export const SessionContext = createContext<SessionCtx>({
-  user: DEMO_ACCOUNTS[0],
-  setUser: () => {},
+  user: null,
+  isLoggedIn: false,
+  login: async () => {},
+  logout: () => {},
   refreshUser: async () => {},
 });
 

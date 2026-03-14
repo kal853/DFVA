@@ -30,7 +30,8 @@ export default function ToolDetail() {
   const params = new URLSearchParams(search);
   const previewMode = params.get("access") === "preview";
 
-  const { user } = useSession();
+  const { user, isLoggedIn } = useSession();
+  const guestPlan = "free";
 
   const { data: tool, isLoading, error } = useQuery<Product>({
     queryKey: ["/api/products", slug],
@@ -84,7 +85,7 @@ export default function ToolDetail() {
   const specs = tool.specs ? JSON.parse(tool.specs) : {};
   const apiCalls = parseInt(tool.stock?.toString() ?? "0");
 
-  const hasAccess = accessData?.access ?? canAccessTool(user.plan, tier);
+  const hasAccess = accessData?.access ?? canAccessTool(user?.plan ?? guestPlan, tier);
   const locked = !hasAccess;
 
   return (
