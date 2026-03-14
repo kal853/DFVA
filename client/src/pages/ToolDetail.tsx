@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { useParams, Link } from "wouter";
-import { ArrowLeft, Shield, Zap, Eye, Globe, Lock, Cpu, Check, ExternalLink } from "lucide-react";
+import { useParams, Link, useSearch } from "wouter";
+import { ArrowLeft, Shield, Zap, Eye, Globe, Lock, Cpu, Check, ExternalLink, Star } from "lucide-react";
 import type { Product } from "@shared/schema";
+import { useSession, canAccessTool, PLAN_RANK } from "@/lib/session";
 
 const CAT_ICONS: Record<string, React.ElementType> = {
   scanning:     Zap,
@@ -18,8 +19,19 @@ const TIER_COLORS: Record<string, { badge: string; glow: string; label: string }
   ENTERPRISE: { badge: "bg-amber-500/10 text-amber-400 border-amber-500/30", glow: "from-amber-500/20", label: "Enterprise Plan" },
 };
 
+const UPGRADE_TO: Record<string, string> = {
+  PRO:        "Pro",
+  ENTERPRISE: "Enterprise",
+};
+
 export default function ToolDetail() {
   const { slug } = useParams<{ slug: string }>();
+  const search = useSearch();
+  const params = new URLSearchParams(search);
+  const previewMode = params.get("access") === "preview";
+
+  const { user, isLoggedIn } = useSession();
+  const guestPlan = "free";
 
   const { data: tool, isLoading, error } = useQuery<Product>({
     queryKey: ["/api/products", slug],
@@ -28,6 +40,18 @@ export default function ToolDetail() {
       if (!res.ok) throw new Error("Tool not found");
       return res.json();
     },
+  });
+
+  // VULN: access check trusts X-Plan-Override header without authentication
+  const { data: accessData } = useQuery<{ access: boolean; via?: string }>({
+    queryKey: ["/api/access/check", slug, previewMode],
+    queryFn: async () => {
+      const headers: Record<string, string> = {};
+      if (previewMode) headers["X-Plan-Override"] = "enterprise";
+      const res = await fetch(`/api/access/check?slug=${slug}&userId=${user.id}`, { headers });
+      return res.json();
+    },
+    enabled: !!slug,
   });
 
   if (isLoading) {
@@ -61,6 +85,9 @@ export default function ToolDetail() {
   const specs = tool.specs ? JSON.parse(tool.specs) : {};
   const apiCalls = parseInt(tool.stock?.toString() ?? "0");
 
+  const hasAccess = accessData?.access ?? canAccessTool(user?.plan ?? guestPlan, tier);
+  const locked = !hasAccess;
+
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
       <Link href="/tools">
@@ -89,12 +116,38 @@ export default function ToolDetail() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Specs */}
+        {/* Specs / Paywall */}
         <div className="lg:col-span-2 space-y-6">
           {Object.keys(specs).length > 0 && (
-            <div>
+            <div className="relative">
               <h2 className="text-lg font-display font-bold text-foreground mb-4">Capabilities</h2>
-              <div className="rounded-xl border border-border/60 overflow-hidden">
+
+              {/* Paywall overlay */}
+              {locked && (
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-xl bg-background/70 backdrop-blur-[3px] border border-border/60">
+                  <div className="text-center p-8 max-w-xs">
+                    <div className="w-12 h-12 rounded-full bg-primary/10 text-primary flex items-center justify-center mx-auto mb-4">
+                      {tier === "ENTERPRISE" ? <Star className="w-6 h-6" /> : <Lock className="w-6 h-6" />}
+                    </div>
+                    <h3 className="font-display font-bold text-foreground mb-2">
+                      {UPGRADE_TO[tier] ?? "Pro"} required
+                    </h3>
+                    <p className="text-sm text-muted-foreground mb-5">
+                      Upgrade to the <strong>{tierInfo.label}</strong> to unlock full access to {tool.name} and its capabilities.
+                    </p>
+                    <Link href="/pricing">
+                      <button
+                        data-testid="button-paywall-upgrade"
+                        className="w-full bg-primary text-primary-foreground rounded-xl py-2.5 text-sm font-semibold transition-all"
+                      >
+                        Upgrade to {UPGRADE_TO[tier] ?? "Pro"}
+                      </button>
+                    </Link>
+                  </div>
+                </div>
+              )}
+
+              <div className={`rounded-xl border border-border/60 overflow-hidden ${locked ? "blur-[2px] select-none pointer-events-none" : ""}`}>
                 {Object.entries(specs).filter(([k]) => k !== "api_calls").map(([key, val], i) => (
                   <div key={key} className={`flex gap-4 px-5 py-3 text-sm ${i % 2 === 0 ? "bg-card/40" : "bg-card/20"}`}>
                     <span className="text-muted-foreground font-medium min-w-[130px] capitalize">{key.replace(/_/g, " ")}</span>
@@ -106,12 +159,16 @@ export default function ToolDetail() {
           )}
         </div>
 
-        {/* Sidebar — get access */}
+        {/* Sidebar */}
         <div className="space-y-4">
           <div className="glass-panel rounded-xl p-6 border border-border/60">
-            <h3 className="font-display font-bold text-foreground mb-1">Get Access</h3>
+            <h3 className="font-display font-bold text-foreground mb-1">
+              {hasAccess ? "You have access" : "Get Access"}
+            </h3>
             <p className="text-sm text-muted-foreground mb-4">
-              {tool.name} is included in the <span className="text-foreground font-medium">{tierInfo.label}</span> and above.
+              {hasAccess
+                ? `${tool.name} is included in your current plan.`
+                : `${tool.name} requires the ${tierInfo.label} or higher.`}
             </p>
 
             <div className="space-y-2 mb-5">
@@ -128,14 +185,23 @@ export default function ToolDetail() {
               ))}
             </div>
 
-            <Link href="/pricing">
-              <button
-                data-testid="button-get-access"
-                className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground rounded-lg py-2.5 text-sm font-semibold transition-all"
+            {hasAccess ? (
+              <div
+                data-testid="status-tool-access"
+                className="w-full flex items-center justify-center gap-2 bg-primary/10 text-primary border border-primary/30 rounded-lg py-2.5 text-sm font-semibold"
               >
-                See Plans <ExternalLink className="w-3.5 h-3.5" />
-              </button>
-            </Link>
+                <Check className="w-4 h-4" /> Active on your plan
+              </div>
+            ) : (
+              <Link href="/pricing">
+                <button
+                  data-testid="button-get-access"
+                  className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground rounded-lg py-2.5 text-sm font-semibold transition-all"
+                >
+                  See Plans <ExternalLink className="w-3.5 h-3.5" />
+                </button>
+              </Link>
+            )}
 
             {tier === "FREE" && (
               <p className="text-xs text-muted-foreground text-center mt-3">Available on all plans including Free</p>
