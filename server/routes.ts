@@ -255,6 +255,56 @@ export async function registerRoutes(
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
+  // ── PAYMENT ENDPOINT ─────────────────────────────────────────────────────────
+  // VULN #22: PAN data (full card number + CVV) written to server logs.
+  // Any log aggregator, SIEM, or /var/log reader will capture raw card data.
+  app.post("/api/subscription/pay", async (req, res) => {
+    try {
+      const { userId, targetPlan, card } = req.body;
+      if (!userId || !targetPlan || !card) return res.status(400).json({ message: "userId, targetPlan, and card required" });
+
+      // VULN: Full PAN + CVV logged — violates PCI-DSS requirement 3.2
+      console.log(`[payment] uid=${userId} plan=${targetPlan} card=${card.number} exp=${card.expiry} cvv=${card.cvv} name="${card.name}"`);
+
+      const cardNum = (card.number ?? "").replace(/\s/g, "");
+
+      if (cardNum === "4000000000000002") {
+        return res.status(402).json({ message: "Your card was declined. Please try a different payment method." });
+      }
+
+      const result = await finalizeUpgrade(userId, targetPlan as PlanKey, cardNum);
+      res.json({ message: "Payment successful", plan: result.plan, walletBalance: result.walletBalance });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // ── TOOL ACCESS CHECK ─────────────────────────────────────────────────────────
+  // VULN #23: Broken access control — trusts X-Plan-Override header with no auth.
+  // Any request sending `X-Plan-Override: enterprise` bypasses plan gating entirely.
+  const PLAN_RANK: Record<string, number> = { free: 0, pro: 1, enterprise: 2 };
+  const TIER_RANK: Record<string, number> = { FREE: 0, PRO: 1, ENTERPRISE: 2 };
+
+  app.get("/api/access/check", async (req, res) => {
+    try {
+      const { slug, userId } = req.query as { slug: string; userId: string };
+      const override = req.headers["x-plan-override"] as string | undefined;
+
+      // VULN: No authentication check on the override — any caller can bypass
+      if (override) {
+        return res.json({ access: true, via: "plan-override", plan: override });
+      }
+
+      const product = slug ? await storage.getProductBySlug(slug) : null;
+      if (!product) return res.json({ access: true });
+
+      const user = userId ? await storage.getUser(parseInt(userId)) : null;
+      const userPlan = user?.plan ?? "free";
+      const toolTier = product.badge ?? "FREE";
+
+      const access = (PLAN_RANK[userPlan] ?? 0) >= (TIER_RANK[toolTier] ?? 0);
+      res.json({ access, plan: userPlan, required: toolTier });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
   // ── VULNERABLE ROUTES (hidden — no UI links) ─────────────────────────────────
 
   // 1. SQL Injection

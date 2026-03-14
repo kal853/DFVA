@@ -1,9 +1,14 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Check, ArrowUp, ArrowDown, Wallet, CreditCard, Loader2, Shield, Zap, Star } from "lucide-react";
-import { api } from "@shared/routes";
+import {
+  Check, ArrowUp, ArrowDown, Wallet, Loader2, Shield, Zap, Star,
+  AlertTriangle, X
+} from "lucide-react";
 import { PLANS } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
+import { useSession } from "@/lib/session";
+import PaymentModal from "@/components/PaymentModal";
+import type { CardDetails } from "@/components/PaymentModal";
 
 const PLAN_ORDER = ["free", "pro", "enterprise"] as const;
 
@@ -63,6 +68,12 @@ const PLAN_UI: Record<string, {
   },
 };
 
+const DOWNGRADE_LOSS: Record<string, string[]> = {
+  free:       ["WebProbe", "VaultBreach", "PhantomTrace", "CipherAudit", "PacketVault", "ThreatFeed Pro", "LogSentinel", "ShadowBrute"],
+  pro:        ["ThreatFeed Pro", "LogSentinel", "ShadowBrute"],
+  enterprise: [],
+};
+
 async function apiFetch(url: string, body: object) {
   const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const data = await res.json();
@@ -73,43 +84,58 @@ async function apiFetch(url: string, body: object) {
 export default function Pricing() {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const [userId, setUserId] = useState(2);
-  const [paymentMethod, setPaymentMethod] = useState("card_4242");
-  const [topupAmount, setTopupAmount] = useState("25");
-  const [log, setLog] = useState<string[]>([]);
+  const { user, refreshUser } = useSession();
 
-  const addLog = (msg: string) => setLog(p => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...p.slice(0, 19)]);
+  const [paymentTarget, setPaymentTarget] = useState<{ plan: string; price: number } | null>(null);
+  const [downgradeTarget, setDowngradeTarget] = useState<string | null>(null);
+  const [topupAmount, setTopupAmount] = useState("25");
 
   const { data: billing, isLoading } = useQuery({
-    queryKey: ["/api/billing", userId],
+    queryKey: ["/api/billing", user.id],
     queryFn: async () => {
-      const res = await fetch(`/api/billing/${userId}`);
+      const res = await fetch(`/api/billing/${user.id}`);
       const d = await res.json();
       if (!res.ok) throw new Error(d.message);
       return d;
     },
   });
 
-  const upgrade = useMutation({
-    mutationFn: (plan: string) => apiFetch(api.billing.upgrade.path, { userId, targetPlan: plan, paymentMethod }),
-    onSuccess: d => { addLog(`Upgraded → ${d.plan}. Credits: $${d.walletBalance}`); qc.invalidateQueries({ queryKey: ["/api/billing", userId] }); toast({ title: "Plan upgraded", description: `Now on ${d.plan} plan` }); },
-    onError: (e: Error) => { addLog(`Error: ${e.message}`); toast({ title: "Error", description: e.message, variant: "destructive" }); },
-  });
+  const currentPlan = billing?.plan ?? user.plan;
+  const currentPlanIdx = PLAN_ORDER.indexOf(currentPlan as any);
 
   const downgrade = useMutation({
-    mutationFn: (plan: string) => apiFetch(api.billing.downgrade.path, { userId, targetPlan: plan }),
-    onSuccess: d => { addLog(`Downgraded. Refund: $${d.refundAmount}. Credits: $${d.walletBalance}`); qc.invalidateQueries({ queryKey: ["/api/billing", userId] }); },
-    onError: (e: Error) => { addLog(`Error: ${e.message}`); },
+    mutationFn: (plan: string) => apiFetch("/api/billing/downgrade", { userId: user.id, targetPlan: plan }),
+    onSuccess: async (d, plan) => {
+      toast({ title: "Plan downgraded", description: `Moved to ${plan}. Refund: $${d.refundAmount ?? "0.00"}` });
+      await refreshUser();
+      qc.invalidateQueries({ queryKey: ["/api/billing", user.id] });
+      setDowngradeTarget(null);
+    },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
   const topup = useMutation({
-    mutationFn: () => apiFetch(api.billing.topup.path, { userId, amount: parseFloat(topupAmount) }),
-    onSuccess: d => { addLog(`Credits topped up. Balance: $${d.walletBalance}`); qc.invalidateQueries({ queryKey: ["/api/billing", userId] }); },
-    onError: (e: Error) => addLog(`Error: ${e.message}`),
+    mutationFn: () => apiFetch("/api/billing/topup", { userId: user.id, amount: parseFloat(topupAmount) }),
+    onSuccess: async (d) => {
+      toast({ title: "Credits added", description: `Balance: $${d.walletBalance}` });
+      await refreshUser();
+      qc.invalidateQueries({ queryKey: ["/api/billing", user.id] });
+    },
+    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
-  const busy = upgrade.isPending || downgrade.isPending || topup.isPending;
-  const currentPlanIdx = billing ? PLAN_ORDER.indexOf(billing.plan as any) : -1;
+  const handlePayment = async (plan: string, price: number, card: CardDetails) => {
+    const data = await apiFetch("/api/subscription/pay", {
+      userId: user.id,
+      targetPlan: plan,
+      card,
+    });
+    await refreshUser();
+    qc.invalidateQueries({ queryKey: ["/api/billing", user.id] });
+    toast({ title: "Subscription updated", description: `Now on ${data.plan} plan.` });
+  };
+
+  const busy = downgrade.isPending || topup.isPending;
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-14">
@@ -121,6 +147,16 @@ export default function Pricing() {
         <p className="text-lg text-muted-foreground max-w-xl mx-auto">
           One subscription. All the tools your security team needs. Cancel anytime.
         </p>
+        {billing && (
+          <div className="inline-flex items-center gap-2 mt-5 px-4 py-2 rounded-full border border-border/60 bg-card/40 text-sm text-muted-foreground">
+            Signed in as <strong className="text-foreground">{billing.username}</strong>
+            <span className="text-border mx-1">·</span>
+            <span className="capitalize text-foreground">{billing.plan} plan</span>
+            <span className="text-border mx-1">·</span>
+            <span className="text-primary font-mono">${parseFloat(billing.walletBalance ?? "0").toFixed(2)} credits</span>
+            {isLoading && <Loader2 className="w-3.5 h-3.5 animate-spin ml-1" />}
+          </div>
+        )}
       </div>
 
       {/* Plan cards */}
@@ -129,7 +165,7 @@ export default function Pricing() {
           const plan = PLANS[planKey];
           const ui = PLAN_UI[planKey];
           const Icon = ui.icon;
-          const isCurrent = billing?.plan === planKey;
+          const isCurrent = currentPlan === planKey;
           const isHigher = idx > currentPlanIdx;
           const isLower = idx < currentPlanIdx;
 
@@ -180,7 +216,7 @@ export default function Pricing() {
                 {isHigher && (
                   <button
                     data-testid={`button-upgrade-${planKey}`}
-                    onClick={() => upgrade.mutate(planKey)}
+                    onClick={() => setPaymentTarget({ plan: planKey, price: plan.price })}
                     disabled={busy}
                     className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground rounded-xl py-2.5 text-sm font-semibold disabled:opacity-50 transition-all"
                   >
@@ -190,7 +226,7 @@ export default function Pricing() {
                 {isLower && (
                   <button
                     data-testid={`button-downgrade-${planKey}`}
-                    onClick={() => downgrade.mutate(planKey)}
+                    onClick={() => setDowngradeTarget(planKey)}
                     disabled={busy}
                     className="w-full flex items-center justify-center gap-2 bg-secondary text-secondary-foreground rounded-xl py-2.5 text-sm font-medium disabled:opacity-50 transition-all"
                   >
@@ -206,88 +242,88 @@ export default function Pricing() {
         })}
       </div>
 
-      {/* Account section */}
+      {/* Credit top-up section */}
       <div className="glass-panel rounded-2xl border border-border/60 p-8">
-        <h2 className="text-xl font-display font-bold text-foreground mb-6">Manage Your Subscription</h2>
-
-        {/* User picker */}
-        <div className="flex flex-wrap items-center gap-3 mb-6 pb-6 border-b border-border/50">
-          <span className="text-sm text-muted-foreground">Demo account ID:</span>
-          <input
-            type="number" min={1} value={userId}
-            onChange={e => setUserId(parseInt(e.target.value))}
-            className="w-16 bg-input text-foreground border border-border rounded-lg px-3 py-1.5 text-sm text-center font-mono"
-          />
-          <button
-            onClick={() => qc.invalidateQueries({ queryKey: ["/api/billing", userId] })}
-            className="bg-primary/20 hover:bg-primary/30 text-primary rounded-lg px-3 py-1.5 text-sm font-medium transition-colors"
-          >
-            Load
-          </button>
-          {isLoading && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
-          {billing && (
-            <span className="text-sm text-muted-foreground">
-              → <strong className="text-foreground">{billing.username}</strong>
-              <span className="mx-2 text-border">·</span>
-              <span className="capitalize text-foreground">{billing.plan} plan</span>
-              <span className="mx-2 text-border">·</span>
-              <span className="text-primary font-mono">${parseFloat(billing.walletBalance).toFixed(2)} credits</span>
-            </span>
-          )}
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-          {/* Payment method */}
-          <div className="space-y-2">
-            <label className="text-xs font-mono uppercase tracking-wider text-muted-foreground">Payment Method</label>
-            <input
-              data-testid="input-payment-method"
-              value={paymentMethod}
-              onChange={e => setPaymentMethod(e.target.value)}
-              className="w-full bg-input text-foreground border border-border rounded-lg px-3 py-2.5 text-sm font-mono"
-            />
-            <p className="text-xs text-muted-foreground">
-              Try <code className="text-primary">fail_test</code> to test failed payment handling.
-            </p>
-          </div>
-
-          {/* Top up credits */}
-          <div className="space-y-2">
+        <h2 className="text-xl font-display font-bold text-foreground mb-2">Add Credits</h2>
+        <p className="text-sm text-muted-foreground mb-6">Credits are used for pay-per-use API calls above your plan limit.</p>
+        <div className="flex flex-wrap items-end gap-4">
+          <div className="space-y-1.5">
             <label className="text-xs font-mono uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
-              <Wallet className="w-3.5 h-3.5" /> Add Credits ($)
+              <Wallet className="w-3.5 h-3.5" /> Amount ($)
             </label>
-            <div className="flex gap-2">
-              <input
-                data-testid="input-topup-amount"
-                type="number"
-                value={topupAmount}
-                onChange={e => setTopupAmount(e.target.value)}
-                className="flex-1 bg-input border border-border rounded-lg px-3 py-2.5 text-sm font-mono text-foreground"
-              />
+            <input
+              data-testid="input-topup-amount"
+              type="number"
+              value={topupAmount}
+              onChange={e => setTopupAmount(e.target.value)}
+              className="w-32 bg-input border border-border rounded-xl px-4 py-2.5 text-sm font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+          </div>
+          <button
+            data-testid="button-topup"
+            onClick={() => topup.mutate()}
+            disabled={busy}
+            className="bg-primary text-primary-foreground rounded-xl px-5 py-2.5 text-sm font-semibold disabled:opacity-50 flex items-center gap-2 transition-all"
+          >
+            {topup.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wallet className="w-4 h-4" />}
+            Top Up
+          </button>
+        </div>
+      </div>
+
+      {/* Payment modal */}
+      {paymentTarget && (
+        <PaymentModal
+          planName={PLANS[paymentTarget.plan].name}
+          planPrice={paymentTarget.price}
+          onConfirm={(card) => handlePayment(paymentTarget.plan, paymentTarget.price, card)}
+          onClose={() => setPaymentTarget(null)}
+        />
+      )}
+
+      {/* Downgrade confirmation modal */}
+      {downgradeTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-sm glass-panel rounded-2xl border border-border/60 p-7 shadow-2xl">
+            <div className="flex items-start gap-3 mb-5">
+              <div className="p-2 rounded-lg bg-destructive/10 text-destructive flex-shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-display font-bold text-foreground mb-1">Downgrade to {PLANS[downgradeTarget]?.name}?</h3>
+                <p className="text-sm text-muted-foreground">You'll immediately lose access to:</p>
+              </div>
+            </div>
+
+            <ul className="mb-6 space-y-1.5 ml-2">
+              {(DOWNGRADE_LOSS[downgradeTarget] ?? []).slice(0, currentPlanIdx === 2 && downgradeTarget === "free" ? 8 : 3).map(t => (
+                <li key={t} className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <X className="w-3.5 h-3.5 text-destructive flex-shrink-0" /> {t}
+                </li>
+              ))}
+            </ul>
+
+            <div className="flex gap-3">
               <button
-                data-testid="button-topup"
-                onClick={() => topup.mutate()}
-                disabled={busy}
-                className="bg-primary text-primary-foreground rounded-lg px-4 py-2.5 text-sm font-semibold disabled:opacity-50 flex items-center gap-1.5"
+                data-testid="button-downgrade-cancel"
+                onClick={() => setDowngradeTarget(null)}
+                className="flex-1 rounded-xl py-2.5 border border-border/60 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
               >
-                <CreditCard className="w-3.5 h-3.5" /> Top Up
+                Cancel
+              </button>
+              <button
+                data-testid="button-downgrade-confirm"
+                onClick={() => downgrade.mutate(downgradeTarget)}
+                disabled={downgrade.isPending}
+                className="flex-1 rounded-xl py-2.5 bg-destructive/10 border border-destructive/30 text-destructive text-sm font-semibold hover:bg-destructive/20 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {downgrade.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                Downgrade
               </button>
             </div>
           </div>
         </div>
-
-        {/* Activity log */}
-        {log.length > 0 && (
-          <div className="mt-6 rounded-xl overflow-hidden border border-border/50">
-            <div className="px-4 py-2.5 border-b border-border/50 bg-card/40 text-xs font-display font-semibold text-muted-foreground uppercase tracking-wider">
-              Activity Log
-            </div>
-            <div className="p-4 font-mono text-xs space-y-1 max-h-36 overflow-auto">
-              {log.map((e, i) => <div key={i} className="text-primary/80">{e}</div>)}
-            </div>
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 }
