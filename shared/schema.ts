@@ -66,6 +66,60 @@ export const walletTransactions = pgTable("wallet_transactions", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// RAG Knowledge Base tables
+export const ragDocuments = pgTable("rag_documents", {
+  id: serial("id").primaryKey(),
+  // VULN: userId trusted from request body — no server-side session verification
+  userId: integer("user_id").references(() => users.id).notNull(),
+  filename: text("filename").notNull(),
+  contentType: text("content_type").notNull(),
+  chunkCount: integer("chunk_count").default(0),
+  status: text("status").default("processing").notNull(), // processing | ready | error
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+});
+
+export const ragChunks = pgTable("rag_chunks", {
+  id: serial("id").primaryKey(),
+  documentId: integer("document_id").references(() => ragDocuments.id).notNull(),
+  // VULN: uploader identity stored verbatim in every chunk — leaks to all retrieval consumers
+  userId: integer("user_id").notNull(),
+  uploaderUsername: text("uploader_username").notNull(),
+  filename: text("filename").notNull(),
+  content: text("content").notNull(),
+  // Embedding stored as JSON float array — no pgvector, similarity computed in JS
+  embedding: text("embedding"),
+  chunkIndex: integer("chunk_index").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// ── Scheduled Scan Jobs ───────────────────────────────────────────────────────
+// VULN: ownership checked at creation only — not at update/cancel/execution.
+export const scanJobs = pgTable("scan_jobs", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id).notNull(),
+  // VULN: targetUrl stored verbatim — no validation; internal IPs/localhost accepted
+  targetUrl: text("target_url").notNull(),
+  toolSlug: text("tool_slug").notNull(),
+  // VULN: schedule field can be PATCHed to "daily"/"weekly" after creation;
+  //       plan gate only enforced on initial POST
+  schedule: text("schedule").notNull().default("one-time"), // one-time | daily | weekly
+  status: text("status").notNull().default("pending"),      // pending | running | completed | failed | cancelled
+  createdAt: timestamp("created_at").defaultNow(),
+  nextRunAt: timestamp("next_run_at").defaultNow(),
+  lastRunAt: timestamp("last_run_at"),
+  // VULN: raw HTTP response snippet stored here — can contain internal metadata content
+  lastResult: text("last_result"),
+  runCount: integer("run_count").default(0),
+});
+
+export type ScanJob = typeof scanJobs.$inferSelect;
+export const insertScanJobSchema = createInsertSchema(scanJobs).omit({ id: true, createdAt: true, lastRunAt: true, lastResult: true, runCount: true });
+
+export type RagDocument = typeof ragDocuments.$inferSelect;
+export type RagChunk = typeof ragChunks.$inferSelect;
+export const insertRagDocumentSchema = createInsertSchema(ragDocuments).omit({ id: true, uploadedAt: true });
+export const insertRagChunkSchema = createInsertSchema(ragChunks).omit({ id: true, createdAt: true });
+
 export const insertUserSchema = createInsertSchema(users).omit({ id: true });
 export const insertProductSchema = createInsertSchema(products).omit({ id: true, createdAt: true });
 export const insertPostSchema = createInsertSchema(posts).omit({ id: true, createdAt: true });

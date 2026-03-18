@@ -1,11 +1,11 @@
 import { db, pool } from "./db";
 import {
-  users, posts, invoices, walletTransactions, products,
+  users, posts, invoices, walletTransactions, products, ragDocuments, ragChunks, scanJobs,
   type User, type InsertUser, type Post, type InsertPost,
   type Invoice, type WalletTransaction, type Product, type InsertProduct,
-  type PlanKey
+  type RagDocument, type RagChunk, type ScanJob, type PlanKey
 } from "@shared/schema";
-import { eq, sql, ilike } from "drizzle-orm";
+import { eq, sql, ilike, lte, and, inArray } from "drizzle-orm";
 
 export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
@@ -30,6 +30,26 @@ export interface IStorage {
   getProductBySlug(slug: string): Promise<Product | undefined>;
   createProduct(product: InsertProduct): Promise<Product>;
   searchProducts(query: string): Promise<Product[]>;
+  // RAG Knowledge Base
+  createRagDocument(data: { userId: number; filename: string; contentType: string }): Promise<RagDocument>;
+  updateRagDocumentStatus(id: number, status: string, chunkCount?: number): Promise<RagDocument>;
+  getRagDocumentsByUser(userId: number): Promise<RagDocument[]>;
+  getRagDocument(id: number): Promise<RagDocument | undefined>;
+  deleteRagDocument(id: number): Promise<void>;
+  // VULN: no tenant filter param — all implementations fetch ALL chunks across all users
+  createRagChunk(data: { documentId: number; userId: number; uploaderUsername: string; filename: string; content: string; embedding: string; chunkIndex: number }): Promise<RagChunk>;
+  getAllRagChunks(): Promise<RagChunk[]>;
+  deleteRagChunksByDocument(documentId: number): Promise<void>;
+  // Scan Jobs
+  createScanJob(data: { userId: number; targetUrl: string; toolSlug: string; schedule: string; nextRunAt: Date }): Promise<ScanJob>;
+  getScanJob(id: number): Promise<ScanJob | undefined>;
+  // VULN: getUserScanJobs has no ownership enforcement — caller supplies userId freely
+  getScanJobsByUser(userId: number): Promise<ScanJob[]>;
+  // VULN: updateScanJob performs no ownership check — IDOR pivot point
+  updateScanJob(id: number, updates: Partial<Pick<ScanJob, "schedule" | "status" | "nextRunAt" | "lastRunAt" | "lastResult" | "runCount">>): Promise<ScanJob>;
+  // VULN: deleteScanJob performs no ownership check — any authenticated caller can cancel any job
+  deleteScanJob(id: number): Promise<void>;
+  getDueScanJobs(): Promise<ScanJob[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -143,6 +163,99 @@ export class DatabaseStorage implements IStorage {
     return await db.select({ id: users.id, username: users.username, role: users.role })
       .from(users)
       .where(ilike(users.username, `%${query}%`));
+  }
+
+  // ── RAG Knowledge Base ────────────────────────────────────────────────────
+
+  async createRagDocument(data: { userId: number; filename: string; contentType: string }): Promise<RagDocument> {
+    const [doc] = await db.insert(ragDocuments).values({
+      userId: data.userId,
+      filename: data.filename,
+      contentType: data.contentType,
+      status: "processing",
+    }).returning();
+    return doc;
+  }
+
+  async updateRagDocumentStatus(id: number, status: string, chunkCount?: number): Promise<RagDocument> {
+    const updates: any = { status };
+    if (chunkCount !== undefined) updates.chunkCount = chunkCount;
+    const [doc] = await db.update(ragDocuments).set(updates).where(eq(ragDocuments.id, id)).returning();
+    return doc;
+  }
+
+  async getRagDocumentsByUser(userId: number): Promise<RagDocument[]> {
+    return await db.select().from(ragDocuments).where(eq(ragDocuments.userId, userId));
+  }
+
+  async getRagDocument(id: number): Promise<RagDocument | undefined> {
+    const [doc] = await db.select().from(ragDocuments).where(eq(ragDocuments.id, id));
+    return doc;
+  }
+
+  async deleteRagDocument(id: number): Promise<void> {
+    await db.delete(ragDocuments).where(eq(ragDocuments.id, id));
+  }
+
+  async createRagChunk(data: {
+    documentId: number; userId: number; uploaderUsername: string;
+    filename: string; content: string; embedding: string; chunkIndex: number;
+  }): Promise<RagChunk> {
+    const [chunk] = await db.insert(ragChunks).values(data).returning();
+    return chunk;
+  }
+
+  // VULN: fetches ALL chunks — no WHERE userId = ? — cross-tenant data exposure
+  async getAllRagChunks(): Promise<RagChunk[]> {
+    return await db.select().from(ragChunks);
+  }
+
+  async deleteRagChunksByDocument(documentId: number): Promise<void> {
+    await db.delete(ragChunks).where(eq(ragChunks.documentId, documentId));
+  }
+
+  // ── Scan Jobs ─────────────────────────────────────────────────────────────────
+
+  async createScanJob(data: { userId: number; targetUrl: string; toolSlug: string; schedule: string; nextRunAt: Date }): Promise<ScanJob> {
+    const [job] = await db.insert(scanJobs).values({
+      userId: data.userId,
+      targetUrl: data.targetUrl,
+      toolSlug: data.toolSlug,
+      schedule: data.schedule,
+      status: "pending",
+      nextRunAt: data.nextRunAt,
+    }).returning();
+    return job;
+  }
+
+  async getScanJob(id: number): Promise<ScanJob | undefined> {
+    const [job] = await db.select().from(scanJobs).where(eq(scanJobs.id, id));
+    return job;
+  }
+
+  async getScanJobsByUser(userId: number): Promise<ScanJob[]> {
+    return await db.select().from(scanJobs).where(eq(scanJobs.userId, userId));
+  }
+
+  // VULN: no ownership verification — id is caller-supplied
+  async updateScanJob(id: number, updates: Partial<Pick<ScanJob, "schedule" | "status" | "nextRunAt" | "lastRunAt" | "lastResult" | "runCount">>): Promise<ScanJob> {
+    const [job] = await db.update(scanJobs).set(updates as any).where(eq(scanJobs.id, id)).returning();
+    return job;
+  }
+
+  // VULN: no ownership verification — any caller can delete any job by id
+  async deleteScanJob(id: number): Promise<void> {
+    await db.delete(scanJobs).where(eq(scanJobs.id, id));
+  }
+
+  async getDueScanJobs(): Promise<ScanJob[]> {
+    const now = new Date();
+    return await db.select().from(scanJobs).where(
+      and(
+        lte(scanJobs.nextRunAt, now),
+        inArray(scanJobs.status, ["pending", "scheduled"])
+      )
+    );
   }
 }
 
