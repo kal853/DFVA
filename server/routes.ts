@@ -25,6 +25,12 @@ import marked from "marked";           // marked@0.3.6  — XSS via unsanitised 
 import _ from "lodash";                // lodash@4.17.15 — prototype pollution (CVE-2019-10744)
 // @ts-ignore — no type declarations for node-serialize@0.0.4
 import serialize from "node-serialize"; // node-serialize@0.0.4 — RCE via IIFE (CVE-2017-5941)
+// Loaded via _require so they land in require.cache and appear in /api/admin/modules
+// VULN: each package exposes a distinct CVE-class attack surface (see routes below)
+const { NodeVM }   = _require("vm2");         // vm2 — sandbox escape  (CVE-2023-29017, CVE-2023-37466)
+const { DOMParser } = _require("xmldom");     // xmldom — XXE          (CVE-2021-21366)
+const pug: any     = _require("pug");         // pug  — SSTI / RCE     (CVE-2021-21353)
+const flatLib: any = _require("flat");        // flat — proto pollution (CVE-2020-28168)
 
 const SEED_TOOLS = [
   {
@@ -607,6 +613,91 @@ export async function registerRoutes(
     const { base, overrides } = req.body;
     const merged = _.merge({}, base, overrides); // VULN: overrides can contain __proto__
     res.json({ config: merged });
+  });
+
+  // 18. vm2@3.9.x — Sandbox Escape → RCE
+  // CVE-2023-29017, CVE-2023-37466: prototype pollution inside vm2 escapes the sandbox.
+  // Payload: code = "this.constructor.constructor('return process')().env"
+  app.post("/api/tools/sandbox", (req, res) => {
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ message: "code required" });
+    try {
+      const vm = new NodeVM({ sandbox: {}, require: { external: false } });
+      const result = vm.run(`module.exports = (function(){ ${code} })()`);
+      res.json({ result: String(result) });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // 19. xmldom@0.6.0 — XXE via external entity injection
+  // CVE-2021-21366: DOMParser does not block DOCTYPE + ENTITY declarations.
+  // Payload: xml = "<!DOCTYPE x [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><x>&xxe;</x>"
+  app.post("/api/tools/parse-xml", (req, res) => {
+    const { xml } = req.body;
+    if (!xml) return res.status(400).json({ message: "xml required" });
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(xml, "text/xml");
+      const tag = doc.documentElement?.tagName ?? "unknown";
+      const text = doc.documentElement?.textContent ?? "";
+      res.json({ tag, text, xml });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // 20. pug@2.x — Server-Side Template Injection → RCE
+  // CVE-2021-21353: pug.render() with attacker-controlled template executes arbitrary code.
+  // Payload: template = "-var x = require('child_process').execSync('id').toString()\n= x"
+  app.post("/api/tools/render-template", (req, res) => {
+    const { template, locals } = req.body;
+    if (!template) return res.status(400).json({ message: "template required" });
+    try {
+      const html = pug.render(template, locals ?? {});
+      res.json({ html });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // 21. flat@5.0.0 — Prototype Pollution via unflatten()
+  // CVE-2020-28168: unflatten({"__proto__.polluted":"yes"}) writes to Object.prototype.
+  // Payload: obj = {"__proto__.polluted": "pwned"}, then check ({}).polluted === "pwned"
+  app.post("/api/tools/flatten", (req, res) => {
+    const { obj, options } = req.body;
+    if (!obj) return res.status(400).json({ message: "obj required" });
+    try {
+      const flattened   = flatLib.flatten(obj, options ?? {});
+      const unflattened = flatLib.unflatten(obj, options ?? {}); // VULN: dangerous path
+      res.json({ flattened, unflattened });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // ── MODULE ENUMERATION ────────────────────────────────────────────────────────
+  // VULN: No authentication — any caller can discover every loaded npm package.
+  // Combined with /api/debug (hardcoded secrets), attacker has full dependency
+  // inventory to cross-reference against NVD for CVE targeting.
+  app.get("/api/admin/modules", (_req, res) => {
+    const allKeys = Object.keys(_require.cache ?? {});
+    const packages = allKeys
+      .filter(k => k.includes("node_modules"))
+      .map(k => {
+        const match = k.match(/node_modules\/(@[^/]+\/[^/]+|[^/]+)/);
+        return match ? match[1] : null;
+      })
+      .filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i)
+      .sort() as string[];
+    const pkgJson = JSON.parse(fs.readFileSync(path.resolve("./package.json"), "utf8"));
+    res.json({
+      loadedModules: packages,
+      count: packages.length,
+      dependencies: pkgJson.dependencies,
+      devDependencies: pkgJson.devDependencies,
+    });
   });
 
   // ── RAG KNOWLEDGE BASE ────────────────────────────────────────────────────────
