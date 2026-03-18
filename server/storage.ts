@@ -21,6 +21,7 @@ export interface IStorage {
   deductWallet(userId: number, amount: number): Promise<User>;
   creditWallet(userId: number, amount: number, description: string): Promise<User>;
   setPlan(userId: number, plan: PlanKey): Promise<User>;
+  setFullName(userId: number, fullName: string): Promise<User>;
   logWalletTransaction(userId: number, amount: number, type: string, description: string): Promise<WalletTransaction>;
   // Products
   getProducts(category?: string): Promise<Product[]>;
@@ -94,6 +95,11 @@ export class DatabaseStorage implements IStorage {
 
   async setPlan(userId: number, plan: PlanKey): Promise<User> {
     const [user] = await db.update(users).set({ plan, planStartDate: new Date() }).where(eq(users.id, userId)).returning();
+    return user;
+  }
+
+  async setFullName(userId: number, fullName: string): Promise<User> {
+    const [user] = await db.update(users).set({ fullName }).where(eq(users.id, userId)).returning();
     return user;
   }
 
