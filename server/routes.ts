@@ -11,7 +11,9 @@ import path from "path";
 import axios from "axios";
 import multer from "multer";
 import { createRequire } from "module";
-const _require = createRequire(import.meta.url);
+// import.meta.url is undefined in the CJS production bundle (esbuild format:"cjs").
+// Use an absolute path derived from process.cwd() so createRequire works in both environments.
+const _require = createRequire(path.resolve("./package.json"));
 const pdfParse: (buf: Buffer) => Promise<{ text: string }> = _require("pdf-parse");
 import { calculateProration, applyCreditsToOrder, finalizeUpgrade, processDowngrade } from "./billing";
 import { PLANS, type PlanKey } from "@shared/schema";
