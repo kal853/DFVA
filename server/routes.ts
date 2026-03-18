@@ -6,10 +6,15 @@ import { exec } from "child_process";
 import fs from "fs";
 import path from "path";
 import axios from "axios";
+import multer from "multer";
+import { createRequire } from "module";
+const _require = createRequire(import.meta.url);
+const pdfParse: (buf: Buffer) => Promise<{ text: string }> = _require("pdf-parse");
 import { calculateProration, applyCreditsToOrder, finalizeUpgrade, processDowngrade } from "./billing";
 import { PLANS, type PlanKey } from "@shared/schema";
 import { chat, type ChatMessage } from "./chat";
 import { logLogin, logPayment, logPlanChange, logAccess } from "./logger";
+import { ingestDocument, retrieveRelevantChunks } from "./rag";
 // Vulnerable packages — intentionally pinned to known-vulnerable versions
 import marked from "marked";           // marked@0.3.6  — XSS via unsanitised HTML (CVE-2022-21681 et al.)
 import _ from "lodash";                // lodash@4.17.15 — prototype pollution (CVE-2019-10744)
@@ -485,16 +490,19 @@ export async function registerRoutes(
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
-  // ── ARIA CHAT (prompt injection vulnerability) ───────────────────────────────
-  // The system prompt in server/chat.ts embeds fake PII + a 3-step persona unlock
-  // sequence. A scanner probing /api/chat with crafted payloads can extract the
-  // hidden customer records and internal credentials without the user knowing.
+  // ── ARIA CHAT (prompt injection + RAG poisoning vulnerability) ───────────────
+  // VULN: RAG retrieval is cross-tenant and unsanitised. If any uploaded doc
+  // contains adversarial instructions, they execute with system-prompt authority.
   app.post("/api/chat", async (req, res) => {
     const { history } = req.body as { history: ChatMessage[] };
     if (!Array.isArray(history)) return res.status(400).json({ message: "history array required" });
     try {
-      const reply = await chat(history);
-      res.json({ reply });
+      const lastUserMsg = [...history].reverse().find(m => m.role === "user")?.content ?? "";
+      // VULN: retrieves chunks from ALL tenants — cross-org data bleed
+      const ragContext = await retrieveRelevantChunks(lastUserMsg).catch(() => null);
+      const reply = await chat(history, ragContext);
+      // VULN: ragContext presence leaked in response — reveals that RAG was triggered
+      res.json({ reply, ragContextInjected: !!ragContext });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }
@@ -506,6 +514,89 @@ export async function registerRoutes(
     const { base, overrides } = req.body;
     const merged = _.merge({}, base, overrides); // VULN: overrides can contain __proto__
     res.json({ config: merged });
+  });
+
+  // ── RAG KNOWLEDGE BASE ────────────────────────────────────────────────────────
+  // Multer: store uploaded file in memory as Buffer
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  });
+
+  // POST /api/rag/upload
+  // VULN #31: Plan check trusts X-User-Plan header from client — no DB verification.
+  //   Set X-User-Plan: enterprise to bypass the gate regardless of actual plan.
+  // VULN #32: userId taken from body with no authentication — any userId can be impersonated.
+  // VULN #33: file content ingested verbatim — prompt injection payloads inside a PDF
+  //   surface unsanitised in ARIA's system prompt during retrieval.
+  app.post("/api/rag/upload", upload.single("file"), async (req, res) => {
+    try {
+      // Broken plan check — trusts client header, not DB
+      const claimedPlan = req.headers["x-user-plan"] as string ?? "free";
+      if (claimedPlan !== "enterprise") {
+        return res.status(403).json({ message: "Knowledge Base upload requires an Enterprise plan." });
+      }
+
+      const userId   = parseInt(req.body.userId ?? "0");
+      const username = req.body.username ?? "unknown";
+      if (!userId) return res.status(400).json({ message: "userId required" });
+      if (!req.file) return res.status(400).json({ message: "file required" });
+
+      const { originalname, mimetype, buffer } = req.file;
+
+      // Extract text based on MIME
+      let text = "";
+      if (mimetype === "application/pdf") {
+        const parsed = await pdfParse(buffer);
+        text = parsed.text;
+      } else {
+        // text/plain, text/markdown, etc.
+        text = buffer.toString("utf8");
+      }
+
+      if (!text.trim()) return res.status(400).json({ message: "Could not extract text from file." });
+
+      const doc = await storage.createRagDocument({ userId, filename: originalname, contentType: mimetype });
+
+      // Ingest asynchronously — respond immediately, let embedding run in background
+      ingestDocument({ documentId: doc.id, userId, uploaderUsername: username, filename: originalname, text })
+        .then(chunkCount => storage.updateRagDocumentStatus(doc.id, "ready", chunkCount))
+        .catch(() => storage.updateRagDocumentStatus(doc.id, "error"));
+
+      res.json({ message: "Upload received. Indexing in progress.", documentId: doc.id, filename: originalname });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // GET /api/rag/documents?userId=
+  // VULN #34: no auth check — pass any userId to list their documents
+  app.get("/api/rag/documents", async (req, res) => {
+    const userId = parseInt(req.query.userId as string ?? "0");
+    if (!userId) return res.status(400).json({ message: "userId required" });
+    const docs = await storage.getRagDocumentsByUser(userId);
+    res.json(docs);
+  });
+
+  // DELETE /api/rag/documents/:id
+  // VULN #35: IDOR — no ownership check. Any user can delete any document by ID.
+  app.delete("/api/rag/documents/:id", async (req, res) => {
+    const id = parseInt(req.params.id);
+    await storage.deleteRagChunksByDocument(id);
+    await storage.deleteRagDocument(id);
+    res.json({ message: "Document deleted." });
+  });
+
+  // GET /api/rag/chunks — raw chunk dump (no auth, full cross-tenant exposure)
+  // VULN #36: exposes every chunk from every tenant, including filename, uploaderUsername, userId
+  app.get("/api/rag/chunks", async (_req, res) => {
+    const chunks = await storage.getAllRagChunks();
+    // Strip embeddings from the dump (too large) but leak all metadata + content
+    res.json(chunks.map(c => ({
+      id: c.id, documentId: c.documentId, userId: c.userId,
+      uploaderUsername: c.uploaderUsername, filename: c.filename,
+      chunkIndex: c.chunkIndex, content: c.content,
+    })));
   });
 
   return httpServer;

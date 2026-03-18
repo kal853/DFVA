@@ -105,11 +105,20 @@ function getClient(): OpenAI {
 
 export type ChatMessage = { role: "user" | "assistant"; content: string };
 
-export async function chat(history: ChatMessage[]): Promise<string> {
+// VULN: ragContext is injected unsanitised into the system prompt.
+// If the retrieved chunks contain adversarial instructions (prompt injection),
+// those instructions execute with system-level authority from the LLM's perspective.
+export async function chat(history: ChatMessage[], ragContext?: string | null): Promise<string> {
   const openai = getClient();
 
+  // VULN: ragContext appended directly to system prompt — no neutralisation,
+  // no sandboxing, no instruction hierarchy. Malicious docs take full effect.
+  const systemContent = ragContext
+    ? `${SYSTEM_PROMPT}\n\n${ragContext}`
+    : SYSTEM_PROMPT;
+
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: systemContent },
     ...history.map(m => ({ role: m.role, content: m.content })),
   ];
 

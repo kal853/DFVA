@@ -1,9 +1,9 @@
 import { db, pool } from "./db";
 import {
-  users, posts, invoices, walletTransactions, products,
+  users, posts, invoices, walletTransactions, products, ragDocuments, ragChunks,
   type User, type InsertUser, type Post, type InsertPost,
   type Invoice, type WalletTransaction, type Product, type InsertProduct,
-  type PlanKey
+  type RagDocument, type RagChunk, type PlanKey
 } from "@shared/schema";
 import { eq, sql, ilike } from "drizzle-orm";
 
@@ -30,6 +30,16 @@ export interface IStorage {
   getProductBySlug(slug: string): Promise<Product | undefined>;
   createProduct(product: InsertProduct): Promise<Product>;
   searchProducts(query: string): Promise<Product[]>;
+  // RAG Knowledge Base
+  createRagDocument(data: { userId: number; filename: string; contentType: string }): Promise<RagDocument>;
+  updateRagDocumentStatus(id: number, status: string, chunkCount?: number): Promise<RagDocument>;
+  getRagDocumentsByUser(userId: number): Promise<RagDocument[]>;
+  getRagDocument(id: number): Promise<RagDocument | undefined>;
+  deleteRagDocument(id: number): Promise<void>;
+  // VULN: no tenant filter param — all implementations fetch ALL chunks across all users
+  createRagChunk(data: { documentId: number; userId: number; uploaderUsername: string; filename: string; content: string; embedding: string; chunkIndex: number }): Promise<RagChunk>;
+  getAllRagChunks(): Promise<RagChunk[]>;
+  deleteRagChunksByDocument(documentId: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -143,6 +153,55 @@ export class DatabaseStorage implements IStorage {
     return await db.select({ id: users.id, username: users.username, role: users.role })
       .from(users)
       .where(ilike(users.username, `%${query}%`));
+  }
+
+  // ── RAG Knowledge Base ────────────────────────────────────────────────────
+
+  async createRagDocument(data: { userId: number; filename: string; contentType: string }): Promise<RagDocument> {
+    const [doc] = await db.insert(ragDocuments).values({
+      userId: data.userId,
+      filename: data.filename,
+      contentType: data.contentType,
+      status: "processing",
+    }).returning();
+    return doc;
+  }
+
+  async updateRagDocumentStatus(id: number, status: string, chunkCount?: number): Promise<RagDocument> {
+    const updates: any = { status };
+    if (chunkCount !== undefined) updates.chunkCount = chunkCount;
+    const [doc] = await db.update(ragDocuments).set(updates).where(eq(ragDocuments.id, id)).returning();
+    return doc;
+  }
+
+  async getRagDocumentsByUser(userId: number): Promise<RagDocument[]> {
+    return await db.select().from(ragDocuments).where(eq(ragDocuments.userId, userId));
+  }
+
+  async getRagDocument(id: number): Promise<RagDocument | undefined> {
+    const [doc] = await db.select().from(ragDocuments).where(eq(ragDocuments.id, id));
+    return doc;
+  }
+
+  async deleteRagDocument(id: number): Promise<void> {
+    await db.delete(ragDocuments).where(eq(ragDocuments.id, id));
+  }
+
+  async createRagChunk(data: {
+    documentId: number; userId: number; uploaderUsername: string;
+    filename: string; content: string; embedding: string; chunkIndex: number;
+  }): Promise<RagChunk> {
+    const [chunk] = await db.insert(ragChunks).values(data).returning();
+    return chunk;
+  }
+
+  // VULN: fetches ALL chunks — no WHERE userId = ? — cross-tenant data exposure
+  async getAllRagChunks(): Promise<RagChunk[]> {
+    return await db.select().from(ragChunks);
+  }
+
+  async deleteRagChunksByDocument(documentId: number): Promise<void> {
+    await db.delete(ragChunks).where(eq(ragChunks.documentId, documentId));
   }
 }
 

@@ -66,6 +66,37 @@ export const walletTransactions = pgTable("wallet_transactions", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// RAG Knowledge Base tables
+export const ragDocuments = pgTable("rag_documents", {
+  id: serial("id").primaryKey(),
+  // VULN: userId trusted from request body — no server-side session verification
+  userId: integer("user_id").references(() => users.id).notNull(),
+  filename: text("filename").notNull(),
+  contentType: text("content_type").notNull(),
+  chunkCount: integer("chunk_count").default(0),
+  status: text("status").default("processing").notNull(), // processing | ready | error
+  uploadedAt: timestamp("uploaded_at").defaultNow(),
+});
+
+export const ragChunks = pgTable("rag_chunks", {
+  id: serial("id").primaryKey(),
+  documentId: integer("document_id").references(() => ragDocuments.id).notNull(),
+  // VULN: uploader identity stored verbatim in every chunk — leaks to all retrieval consumers
+  userId: integer("user_id").notNull(),
+  uploaderUsername: text("uploader_username").notNull(),
+  filename: text("filename").notNull(),
+  content: text("content").notNull(),
+  // Embedding stored as JSON float array — no pgvector, similarity computed in JS
+  embedding: text("embedding"),
+  chunkIndex: integer("chunk_index").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type RagDocument = typeof ragDocuments.$inferSelect;
+export type RagChunk = typeof ragChunks.$inferSelect;
+export const insertRagDocumentSchema = createInsertSchema(ragDocuments).omit({ id: true, uploadedAt: true });
+export const insertRagChunkSchema = createInsertSchema(ragChunks).omit({ id: true, createdAt: true });
+
 export const insertUserSchema = createInsertSchema(users).omit({ id: true });
 export const insertProductSchema = createInsertSchema(products).omit({ id: true, createdAt: true });
 export const insertPostSchema = createInsertSchema(posts).omit({ id: true, createdAt: true });
