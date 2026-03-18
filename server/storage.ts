@@ -1,11 +1,11 @@
 import { db, pool } from "./db";
 import {
-  users, posts, invoices, walletTransactions, products, ragDocuments, ragChunks,
+  users, posts, invoices, walletTransactions, products, ragDocuments, ragChunks, scanJobs,
   type User, type InsertUser, type Post, type InsertPost,
   type Invoice, type WalletTransaction, type Product, type InsertProduct,
-  type RagDocument, type RagChunk, type PlanKey
+  type RagDocument, type RagChunk, type ScanJob, type PlanKey
 } from "@shared/schema";
-import { eq, sql, ilike } from "drizzle-orm";
+import { eq, sql, ilike, lte, and, inArray } from "drizzle-orm";
 
 export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
@@ -40,6 +40,16 @@ export interface IStorage {
   createRagChunk(data: { documentId: number; userId: number; uploaderUsername: string; filename: string; content: string; embedding: string; chunkIndex: number }): Promise<RagChunk>;
   getAllRagChunks(): Promise<RagChunk[]>;
   deleteRagChunksByDocument(documentId: number): Promise<void>;
+  // Scan Jobs
+  createScanJob(data: { userId: number; targetUrl: string; toolSlug: string; schedule: string; nextRunAt: Date }): Promise<ScanJob>;
+  getScanJob(id: number): Promise<ScanJob | undefined>;
+  // VULN: getUserScanJobs has no ownership enforcement — caller supplies userId freely
+  getScanJobsByUser(userId: number): Promise<ScanJob[]>;
+  // VULN: updateScanJob performs no ownership check — IDOR pivot point
+  updateScanJob(id: number, updates: Partial<Pick<ScanJob, "schedule" | "status" | "nextRunAt" | "lastRunAt" | "lastResult" | "runCount">>): Promise<ScanJob>;
+  // VULN: deleteScanJob performs no ownership check — any authenticated caller can cancel any job
+  deleteScanJob(id: number): Promise<void>;
+  getDueScanJobs(): Promise<ScanJob[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -202,6 +212,50 @@ export class DatabaseStorage implements IStorage {
 
   async deleteRagChunksByDocument(documentId: number): Promise<void> {
     await db.delete(ragChunks).where(eq(ragChunks.documentId, documentId));
+  }
+
+  // ── Scan Jobs ─────────────────────────────────────────────────────────────────
+
+  async createScanJob(data: { userId: number; targetUrl: string; toolSlug: string; schedule: string; nextRunAt: Date }): Promise<ScanJob> {
+    const [job] = await db.insert(scanJobs).values({
+      userId: data.userId,
+      targetUrl: data.targetUrl,
+      toolSlug: data.toolSlug,
+      schedule: data.schedule,
+      status: "pending",
+      nextRunAt: data.nextRunAt,
+    }).returning();
+    return job;
+  }
+
+  async getScanJob(id: number): Promise<ScanJob | undefined> {
+    const [job] = await db.select().from(scanJobs).where(eq(scanJobs.id, id));
+    return job;
+  }
+
+  async getScanJobsByUser(userId: number): Promise<ScanJob[]> {
+    return await db.select().from(scanJobs).where(eq(scanJobs.userId, userId));
+  }
+
+  // VULN: no ownership verification — id is caller-supplied
+  async updateScanJob(id: number, updates: Partial<Pick<ScanJob, "schedule" | "status" | "nextRunAt" | "lastRunAt" | "lastResult" | "runCount">>): Promise<ScanJob> {
+    const [job] = await db.update(scanJobs).set(updates as any).where(eq(scanJobs.id, id)).returning();
+    return job;
+  }
+
+  // VULN: no ownership verification — any caller can delete any job by id
+  async deleteScanJob(id: number): Promise<void> {
+    await db.delete(scanJobs).where(eq(scanJobs.id, id));
+  }
+
+  async getDueScanJobs(): Promise<ScanJob[]> {
+    const now = new Date();
+    return await db.select().from(scanJobs).where(
+      and(
+        lte(scanJobs.nextRunAt, now),
+        inArray(scanJobs.status, ["pending", "scheduled"])
+      )
+    );
   }
 }
 

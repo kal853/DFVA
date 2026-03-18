@@ -599,5 +599,94 @@ export async function registerRoutes(
     })));
   });
 
+  // ── SCHEDULED SCAN JOBS ───────────────────────────────────────────────────────
+
+  // POST /api/scans
+  // Plan gate enforced here at creation ONLY.
+  // VULN #37: targetUrl stored verbatim — internal IPs/localhost accepted, executed by worker (Stored SSRF)
+  // VULN #38: userId taken from body with no session verification — any userId can be impersonated
+  app.post("/api/scans", async (req, res) => {
+    try {
+      const { userId, targetUrl, toolSlug, schedule } = req.body;
+      if (!userId || !targetUrl || !toolSlug) {
+        return res.status(400).json({ message: "userId, targetUrl and toolSlug required" });
+      }
+
+      // Plan gate — only checked at creation
+      const user = await storage.getUser(parseInt(userId));
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      const allowedSchedules =
+        user.plan === "enterprise" || user.plan === "pro"
+          ? ["one-time", "daily", "weekly"]
+          : ["one-time"];
+
+      const chosenSchedule = schedule ?? "one-time";
+      if (!allowedSchedules.includes(chosenSchedule)) {
+        return res.status(403).json({
+          message: `Schedule "${chosenSchedule}" requires Pro or Enterprise plan.`,
+        });
+      }
+
+      const job = await storage.createScanJob({
+        userId: parseInt(userId),
+        targetUrl,
+        toolSlug,
+        schedule: chosenSchedule,
+        nextRunAt: new Date(),
+      });
+
+      res.json(job);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/scans?userId=
+  // VULN #39: no auth check — supply any userId to list their jobs (IDOR enumeration)
+  app.get("/api/scans", async (req, res) => {
+    const userId = parseInt(req.query.userId as string ?? "0");
+    if (!userId) return res.status(400).json({ message: "userId required" });
+    const jobs = await storage.getScanJobsByUser(userId);
+    res.json(jobs);
+  });
+
+  // GET /api/scans/:id — retrieve single job including lastResult
+  // VULN #40: no ownership check — enumerate IDs to read any user's scan results
+  //           lastResult may contain internal metadata if targetUrl was a cloud metadata endpoint
+  app.get("/api/scans/:id", async (req, res) => {
+    const job = await storage.getScanJob(parseInt(req.params.id));
+    if (!job) return res.status(404).json({ message: "Not found" });
+    res.json(job);
+  });
+
+  // PATCH /api/scans/:id
+  // VULN #41: plan gate NOT re-checked — free user creates one-time job, then PATCHes
+  //           schedule to "daily" or "weekly". Worker will keep rescheduling indefinitely.
+  // VULN #42: no ownership check — modify any job by ID (IDOR)
+  app.patch("/api/scans/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      const { schedule } = req.body;
+      const allowed = ["one-time", "daily", "weekly"];
+      if (schedule && !allowed.includes(schedule)) {
+        return res.status(400).json({ message: "Invalid schedule value" });
+      }
+      // VULN: updates schedule with no plan re-check and no ownership verification
+      const updates: any = {};
+      if (schedule) updates.schedule = schedule;
+      const job = await storage.updateScanJob(id, updates);
+      res.json(job);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // DELETE /api/scans/:id
+  // VULN #43: no ownership check — any authenticated (or unauthenticated) caller can
+  //           cancel another user's scheduled scans by guessing/enumerating the job ID
+  app.delete("/api/scans/:id", async (req, res) => {
+    try {
+      await storage.deleteScanJob(parseInt(req.params.id));
+      res.json({ message: "Job deleted." });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
   return httpServer;
 }

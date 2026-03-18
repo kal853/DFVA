@@ -11,6 +11,7 @@ import ToolDetail from "./pages/ToolDetail";
 import Pricing from "./pages/Pricing";
 import Login from "./pages/Login";
 import KnowledgeBase from "./pages/KnowledgeBase";
+import Scans from "./pages/Scans";
 import ChatWidget from "@/components/ChatWidget";
 import NotFound from "@/pages/not-found";
 import { SessionContext, SessionUser, PLAN_LABEL, useSession } from "./lib/session";
@@ -34,7 +35,10 @@ function NavBar({ user, onLogout }: NavBarProps) {
     { href: "/", label: "Home" },
     { href: "/tools", label: "Tools" },
     { href: "/pricing", label: "Pricing" },
-    ...(user ? [{ href: "/knowledge-base", label: "Knowledge Base" }] : []),
+    ...(user ? [
+      { href: "/scans", label: "Scans" },
+      { href: "/knowledge-base", label: "Knowledge Base" },
+    ] : []),
   ];
 
   return (
@@ -221,6 +225,7 @@ function AppShell() {
           <Route path="/pricing" component={Pricing} />
           <Route path="/login" component={Login} />
           <Route path="/knowledge-base" component={KnowledgeBase} />
+          <Route path="/scans" component={Scans} />
           <Route component={NotFound} />
         </Switch>
       </main>
