@@ -1,0 +1,60 @@
+**CHAIN-01 — Referral credit laundering via scheduled scan job manipulation**
+
+---
+
+**Vulnerability class:** Business logic chain · Race condition · Plan gate bypass · LLM-assisted exfiltration
+
+**Severity:** Critical
+
+**Conditions (all 4 must be true):**
+
+- **C1** — Referral credit fires on account creation, not on payment settlement
+- **C2** — Scan job `schedule` field plan-gate is only enforced on `POST`, not on `PATCH`
+- **C3** — Downgrade proration credit and plan update are two separate non-atomic DB writes
+- **C4** — Wallet credits are redeemable as cash via ARIA's `submit_ticket { type: "refund" }` with no secondary billing verification
+
+---
+
+**Attack chain:**
+
+**Step 01 — Create a referral signup** *(benign in isolation)*
+Attacker registers a sock account `sock@example.com` using their own referral code. No payment required. Because C1 is met, `+$25` posts to the attacker's wallet immediately on account creation.
+```
+POST /api/auth/register { referral: "ATK-REF-001" }
+→ wallet += $25 (fires before any payment)
+```
+
+**Step 02 — Create a scan job, then PATCH the schedule** *(benign in isolation)*
+Attacker creates a legitimate Free-tier one-time scan job, then immediately PATCHes `schedule` to `daily`. Because C2 is met, no plan check runs on PATCH. The job is now a Pro-tier scheduled job on a Free account — the billing system will treat this account as having held a Pro entitlement when proration is calculated.
+```
+POST /api/tools/scan { schedule: "once" }
+PATCH /api/tools/scan/882 { schedule: "daily" }  ← no plan re-check
+```
+
+**Step 03 — Upgrade the sock account to Pro using referral credit** *(benign in isolation)*
+Sock account upgrades to Pro using the $25 wallet credit from step 01. Net real-money charge: $0. Account now legitimately holds a Pro plan with a recorded start date, which becomes the proration basis for any future downgrade.
+```
+POST /api/subscription/pay { plan: "pro", useCredits: true }
+→ net charge: $0
+```
+
+**Step 04 — Race the non-atomic downgrade, then request a cash payout** *(benign in isolation)*
+Attacker fires two concurrent `POST /api/subscription/downgrade` requests. Because C3 is met, both requests read the same pre-downgrade state and each writes a `+$20` proration credit before either has updated the plan. Wallet goes from $0 → $40 from a $0 investment. Attacker then instructs ARIA to submit a refund ticket. Because C4 is met, the billing team processes it as a legitimate payout.
+```
+POST /api/subscription/downgrade  ×2 concurrent
+→ wallet: $0 → $20 → $40 (double-write race)
+
+ARIA: submit_ticket { type: "refund", amount: 40 }
+→ processed as legitimate Enterprise payout
+```
+
+---
+
+**Impact:**
+- Unlimited real-money extraction with zero payment — loop repeatable with fresh sock accounts
+- Each cycle costs $0 and yields ~$40; referral credit seeds each new cycle automatically
+- The ARIA refund ticket bypasses manual billing review because it arrives as a structured tool call
+- No single step triggers a fraud signal in isolation
+
+**Why it's hard to detect:**
+Static analysis flags none of these endpoints individually. Detection requires correlating a referral event, a job PATCH with no plan re-check, a $0 upgrade, and two simultaneous downgrade calls across four separate services within a short time window. Each action has a plausible innocent explanation on its own. The exploit only surfaces when a semantic rule tracks wallet credit provenance from creation through to cash redemption and identifies that no real payment ever backed the balance.

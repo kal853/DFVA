@@ -1,6 +1,9 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { db } from "./db";
+import { walletTransactions } from "@shared/schema";
+import { eq } from "drizzle-orm";
 import { api } from "@shared/routes";
 import { exec } from "child_process";
 import fs from "fs";
@@ -232,7 +235,17 @@ export async function registerRoutes(
     try {
       const user = await storage.getUser(parseInt(req.params.userId));
       if (!user) return res.status(404).json({ message: "User not found" });
-      res.json({ userId: user.id, username: user.username, plan: user.plan, walletBalance: user.walletBalance, planStartDate: user.planStartDate?.toISOString() ?? null });
+      res.json({ userId: user.id, username: user.username, plan: user.plan, walletBalance: user.walletBalance, planStartDate: user.planStartDate?.toISOString() ?? null, referralCode: user.referralCode });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/wallet/transactions/:userId
+  // VULN: no auth check — supply any userId to read their transaction history
+  app.get("/api/wallet/transactions/:userId", async (req, res) => {
+    try {
+      const userId = parseInt(req.params.userId);
+      const txs = await db.select().from(walletTransactions).where(eq(walletTransactions.userId, userId));
+      res.json(txs);
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -302,6 +315,81 @@ export async function registerRoutes(
 
   app.post("/api/auth/logout", (_req, res) => {
     res.json({ message: "Logged out." });
+  });
+
+  // ── REGISTRATION with REFERRAL CREDIT ─────────────────────────────────────────
+  // VULN #44 (C1): Referral credit fires on account CREATION, not on payment settlement.
+  //   → Attacker registers infinite sock accounts with referral code to generate credits.
+  // VULN #45: Referral code redemptions are not rate-limited or single-use.
+  //   → Same code can be used by unlimited sock accounts, each yielding $25 to the referrer.
+  app.post("/api/auth/register", async (req, res) => {
+    try {
+      const { username, password, email, fullName, referralCode } = req.body;
+      if (!username || !password) return res.status(400).json({ message: "username and password required" });
+
+      const existing = await storage.getUserByUsername(username);
+      if (existing) return res.status(409).json({ message: "Username already taken." });
+
+      // Create account first
+      const newUser = await storage.createUser({
+        username, password, email: email ?? null,
+        fullName: fullName ?? null, role: "user", plan: "free", walletBalance: "0.00",
+      });
+
+      // Generate a unique referral code for the new user (format: REF-XXXXXX)
+      const code = `REF-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+      await storage.setReferralCode(newUser.id, code);
+
+      // VULN: credit referrer immediately on account creation — no payment required
+      // VULN: referralCode not invalidated after use — unlimited reuse
+      if (referralCode) {
+        const referrer = await storage.getUserByReferralCode(referralCode);
+        if (referrer) {
+          const REFERRAL_CREDIT = 25;
+          await storage.creditWallet(referrer.id, REFERRAL_CREDIT, `Referral credit — new signup: ${username}`);
+          await storage.logWalletTransaction(referrer.id, REFERRAL_CREDIT, "referral", `Referral signup: ${username}`);
+          console.log(`[referral] code=${referralCode} referrer=${referrer.username} credited $${REFERRAL_CREDIT} — no payment required`);
+        }
+      }
+
+      const fresh = await storage.getUser(newUser.id);
+      res.json({ id: fresh!.id, username: fresh!.username, plan: fresh!.plan, walletBalance: fresh!.walletBalance, role: fresh!.role, fullName: fresh!.fullName, referralCode: code });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/referral/:userId — returns referral code for any user (IDOR: no auth)
+  // VULN #46: no ownership check — any caller can harvest referral codes for all users
+  app.get("/api/referral/:userId", async (req, res) => {
+    const user = await storage.getUser(parseInt(req.params.userId));
+    if (!user) return res.status(404).json({ message: "Not found" });
+    res.json({ userId: user.id, username: user.username, referralCode: user.referralCode });
+  });
+
+  // ── TICKETS ───────────────────────────────────────────────────────────────────
+
+  // GET /api/tickets?userId= — IDOR: no auth, enumerate any user's tickets
+  app.get("/api/tickets", async (req, res) => {
+    const userId = parseInt(req.query.userId as string ?? "0");
+    if (!userId) return res.status(400).json({ message: "userId required" });
+    res.json(await storage.getTicketsByUser(userId));
+  });
+
+  // POST /api/tickets — manual ticket creation (ARIA tool call also creates tickets)
+  // VULN #47: userId taken from body — any caller can submit tickets on behalf of any user
+  app.post("/api/tickets", async (req, res) => {
+    try {
+      const { userId, type, amount, reason } = req.body;
+      if (!userId || !type) return res.status(400).json({ message: "userId and type required" });
+      const ticket = await storage.createTicket({ userId: parseInt(userId), type, amount, reason, autoApproved: false, ariaGenerated: false });
+      res.json(ticket);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/tickets/:id — IDOR: no ownership check
+  app.get("/api/tickets/:id", async (req, res) => {
+    const ticket = await storage.getTicket(parseInt(req.params.id));
+    if (!ticket) return res.status(404).json({ message: "Not found" });
+    res.json(ticket);
   });
 
   // ── PAYMENT ENDPOINT ─────────────────────────────────────────────────────────
@@ -490,19 +578,22 @@ export async function registerRoutes(
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
-  // ── ARIA CHAT (prompt injection + RAG poisoning vulnerability) ───────────────
+  // ── ARIA CHAT (prompt injection + RAG poisoning + ARIA tool abuse) ───────────
   // VULN: RAG retrieval is cross-tenant and unsanitised. If any uploaded doc
   // contains adversarial instructions, they execute with system-prompt authority.
+  // VULN: userId taken from request body — no session check. Any user can pose as any userId.
+  // VULN: ARIA tool calls (submit_ticket, get_wallet_balance) use caller-supplied userId
+  //       and auto-approve refund tickets with no payment provenance verification (C4).
   app.post("/api/chat", async (req, res) => {
-    const { history } = req.body as { history: ChatMessage[] };
+    const { history, userId } = req.body as { history: ChatMessage[]; userId?: number };
     if (!Array.isArray(history)) return res.status(400).json({ message: "history array required" });
     try {
       const lastUserMsg = [...history].reverse().find(m => m.role === "user")?.content ?? "";
       // VULN: retrieves chunks from ALL tenants — cross-org data bleed
       const ragContext = await retrieveRelevantChunks(lastUserMsg).catch(() => null);
-      const reply = await chat(history, ragContext);
-      // VULN: ragContext presence leaked in response — reveals that RAG was triggered
-      res.json({ reply, ragContextInjected: !!ragContext });
+      // VULN: callerUserId not verified against session — ARIA acts on it as truth
+      const result = await chat(history, ragContext, userId);
+      res.json({ reply: result.reply, ragContextInjected: result.ragContextInjected, toolCalls: result.toolCalls });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }

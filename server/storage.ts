@@ -1,11 +1,11 @@
 import { db, pool } from "./db";
 import {
-  users, posts, invoices, walletTransactions, products, ragDocuments, ragChunks, scanJobs,
+  users, posts, invoices, walletTransactions, products, ragDocuments, ragChunks, scanJobs, tickets,
   type User, type InsertUser, type Post, type InsertPost,
   type Invoice, type WalletTransaction, type Product, type InsertProduct,
-  type RagDocument, type RagChunk, type ScanJob, type PlanKey
+  type RagDocument, type RagChunk, type ScanJob, type PlanKey, type Ticket
 } from "@shared/schema";
-import { eq, sql, ilike, lte, and, inArray } from "drizzle-orm";
+import { eq, sql, ilike, lte, and, inArray, desc } from "drizzle-orm";
 
 export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
@@ -50,6 +50,14 @@ export interface IStorage {
   // VULN: deleteScanJob performs no ownership check — any authenticated caller can cancel any job
   deleteScanJob(id: number): Promise<void>;
   getDueScanJobs(): Promise<ScanJob[]>;
+  // Referral
+  getUserByReferralCode(code: string): Promise<User | undefined>;
+  setReferralCode(userId: number, code: string): Promise<User>;
+  // Tickets
+  createTicket(data: { userId: number; type: string; amount?: number; reason?: string; autoApproved?: boolean; ariaGenerated?: boolean }): Promise<Ticket>;
+  getTicketsByUser(userId: number): Promise<Ticket[]>;
+  getTicket(id: number): Promise<Ticket | undefined>;
+  updateTicketStatus(id: number, status: string): Promise<Ticket>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -256,6 +264,54 @@ export class DatabaseStorage implements IStorage {
         inArray(scanJobs.status, ["pending", "scheduled"])
       )
     );
+  }
+
+  // ── Referral ──────────────────────────────────────────────────────────────────
+
+  // VULN: no rate-limit on redemptions — same referral code redeemable infinitely
+  async getUserByReferralCode(code: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.referralCode, code));
+    return user;
+  }
+
+  async setReferralCode(userId: number, code: string): Promise<User> {
+    const [user] = await db.update(users).set({ referralCode: code }).where(eq(users.id, userId)).returning();
+    return user;
+  }
+
+  // ── Tickets ───────────────────────────────────────────────────────────────────
+
+  // VULN: ariaGenerated tickets auto-approved — no billing verification performed.
+  // Refund amount taken from wallet balance regardless of payment provenance.
+  async createTicket(data: {
+    userId: number; type: string; amount?: number; reason?: string;
+    autoApproved?: boolean; ariaGenerated?: boolean;
+  }): Promise<Ticket> {
+    const [ticket] = await db.insert(tickets).values({
+      userId: data.userId,
+      type: data.type,
+      amount: data.amount != null ? data.amount.toFixed(2) : null,
+      reason: data.reason ?? null,
+      status: data.autoApproved ? "approved" : "open",
+      autoApproved: data.autoApproved ?? false,
+      ariaGenerated: data.ariaGenerated ?? false,
+    }).returning();
+    return ticket;
+  }
+
+  // VULN: no ownership check — any caller can enumerate ticket IDs
+  async getTicketsByUser(userId: number): Promise<Ticket[]> {
+    return await db.select().from(tickets).where(eq(tickets.userId, userId)).orderBy(desc(tickets.createdAt));
+  }
+
+  async getTicket(id: number): Promise<Ticket | undefined> {
+    const [ticket] = await db.select().from(tickets).where(eq(tickets.id, id));
+    return ticket;
+  }
+
+  async updateTicketStatus(id: number, status: string): Promise<Ticket> {
+    const [ticket] = await db.update(tickets).set({ status }).where(eq(tickets.id, id)).returning();
+    return ticket;
   }
 }
 
