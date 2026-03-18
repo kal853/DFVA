@@ -1,9 +1,11 @@
 import { db, pool } from "./db";
 import {
   users, posts, invoices, walletTransactions, products, ragDocuments, ragChunks, scanJobs, tickets,
+  workspaces, workspaceMembers, workspaceInvitations,
   type User, type InsertUser, type Post, type InsertPost,
   type Invoice, type WalletTransaction, type Product, type InsertProduct,
-  type RagDocument, type RagChunk, type ScanJob, type PlanKey, type Ticket
+  type RagDocument, type RagChunk, type ScanJob, type PlanKey, type Ticket,
+  type Workspace, type WorkspaceMember, type WorkspaceInvitation,
 } from "@shared/schema";
 import { eq, sql, ilike, lte, and, inArray, desc } from "drizzle-orm";
 
@@ -58,6 +60,18 @@ export interface IStorage {
   getTicketsByUser(userId: number): Promise<Ticket[]>;
   getTicket(id: number): Promise<Ticket | undefined>;
   updateTicketStatus(id: number, status: string): Promise<Ticket>;
+  // Workspaces — VULN: all methods perform no ownership / role verification
+  createWorkspace(data: { name: string; ownerId: number }): Promise<Workspace>;
+  getWorkspace(id: number): Promise<Workspace | undefined>;
+  getWorkspacesByUser(userId: number): Promise<Workspace[]>;
+  addWorkspaceMember(data: { workspaceId: number; userId: number; role: string }): Promise<WorkspaceMember>;
+  getWorkspaceMembers(workspaceId: number): Promise<(WorkspaceMember & { username: string; email: string | null })[]>;
+  updateMemberRole(memberId: number, role: string): Promise<WorkspaceMember>;
+  removeWorkspaceMember(memberId: number): Promise<void>;
+  createInvitation(data: { workspaceId: number; email: string; role: string; token: string }): Promise<WorkspaceInvitation>;
+  getInvitationByToken(token: string): Promise<WorkspaceInvitation | undefined>;
+  acceptInvitation(token: string, userId: number, role: string): Promise<WorkspaceInvitation>;
+  getWorkspaceInvitations(workspaceId: number): Promise<WorkspaceInvitation[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -312,6 +326,90 @@ export class DatabaseStorage implements IStorage {
   async updateTicketStatus(id: number, status: string): Promise<Ticket> {
     const [ticket] = await db.update(tickets).set({ status }).where(eq(tickets.id, id)).returning();
     return ticket;
+  }
+
+  // ── Workspaces ────────────────────────────────────────────────────────────────
+  // VULN: zero ownership / role enforcement in every method — API caller supplies IDs freely.
+
+  async createWorkspace(data: { name: string; ownerId: number }): Promise<Workspace> {
+    const [ws] = await db.insert(workspaces).values(data).returning();
+    // Auto-add owner as admin member
+    await db.insert(workspaceMembers).values({ workspaceId: ws.id, userId: data.ownerId, role: "admin" });
+    return ws;
+  }
+
+  async getWorkspace(id: number): Promise<Workspace | undefined> {
+    const [ws] = await db.select().from(workspaces).where(eq(workspaces.id, id));
+    return ws;
+  }
+
+  // VULN: returns workspaces where user is a member OR owner — but route accepts any userId param
+  async getWorkspacesByUser(userId: number): Promise<Workspace[]> {
+    const memberRows = await db.select({ workspaceId: workspaceMembers.workspaceId })
+      .from(workspaceMembers).where(eq(workspaceMembers.userId, userId));
+    const ids = memberRows.map(r => r.workspaceId);
+    if (!ids.length) return [];
+    return await db.select().from(workspaces).where(inArray(workspaces.id, ids));
+  }
+
+  async addWorkspaceMember(data: { workspaceId: number; userId: number; role: string }): Promise<WorkspaceMember> {
+    const [member] = await db.insert(workspaceMembers).values(data).returning();
+    return member;
+  }
+
+  async getWorkspaceMembers(workspaceId: number): Promise<(WorkspaceMember & { username: string; email: string | null })[]> {
+    const rows = await db.select({
+      id: workspaceMembers.id,
+      workspaceId: workspaceMembers.workspaceId,
+      userId: workspaceMembers.userId,
+      role: workspaceMembers.role,
+      joinedAt: workspaceMembers.joinedAt,
+      username: users.username,
+      email: users.email,
+    }).from(workspaceMembers)
+      .innerJoin(users, eq(workspaceMembers.userId, users.id))
+      .where(eq(workspaceMembers.workspaceId, workspaceId));
+    return rows;
+  }
+
+  // VULN: no check that caller is a workspace admin
+  async updateMemberRole(memberId: number, role: string): Promise<WorkspaceMember> {
+    const [member] = await db.update(workspaceMembers).set({ role }).where(eq(workspaceMembers.id, memberId)).returning();
+    return member;
+  }
+
+  // VULN: no check that caller is a workspace admin
+  async removeWorkspaceMember(memberId: number): Promise<void> {
+    await db.delete(workspaceMembers).where(eq(workspaceMembers.id, memberId));
+  }
+
+  // VULN: token is Math.random().toString(36).substring(2) — weak randomness, same as #13
+  async createInvitation(data: { workspaceId: number; email: string; role: string; token: string }): Promise<WorkspaceInvitation> {
+    const [inv] = await db.insert(workspaceInvitations).values(data).returning();
+    return inv;
+  }
+
+  async getInvitationByToken(token: string): Promise<WorkspaceInvitation | undefined> {
+    const [inv] = await db.select().from(workspaceInvitations).where(eq(workspaceInvitations.token, token));
+    return inv;
+  }
+
+  // VULN: role param overrides the role stored in the invitation — passed directly from URL query param
+  async acceptInvitation(token: string, userId: number, role: string): Promise<WorkspaceInvitation> {
+    const inv = await this.getInvitationByToken(token);
+    if (!inv) throw new Error("Invitation not found");
+    if (inv.acceptedAt) throw new Error("Invitation already accepted");
+    await this.addWorkspaceMember({ workspaceId: inv.workspaceId, userId, role });
+    const [updated] = await db.update(workspaceInvitations)
+      .set({ acceptedAt: new Date(), acceptedByUserId: userId })
+      .where(eq(workspaceInvitations.token, token)).returning();
+    return updated;
+  }
+
+  async getWorkspaceInvitations(workspaceId: number): Promise<WorkspaceInvitation[]> {
+    return await db.select().from(workspaceInvitations)
+      .where(eq(workspaceInvitations.workspaceId, workspaceId))
+      .orderBy(desc(workspaceInvitations.createdAt));
   }
 }
 

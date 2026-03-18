@@ -157,6 +157,47 @@ export type Invoice = typeof invoices.$inferSelect;
 export type Coupon = typeof coupons.$inferSelect;
 export type WalletTransaction = typeof walletTransactions.$inferSelect;
 
+// ── Team Workspaces ───────────────────────────────────────────────────────────
+// VULN: No plan-gate on workspace creation — any free user can create one.
+export const workspaces = pgTable("workspaces", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  ownerId: integer("owner_id").references(() => users.id).notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// VULN: role enforced only at UI layer — API routes perform no role checks.
+// Any member can call admin-only actions (promote, remove, invite).
+export const workspaceMembers = pgTable("workspace_members", {
+  id: serial("id").primaryKey(),
+  workspaceId: integer("workspace_id").references(() => workspaces.id).notNull(),
+  userId: integer("user_id").references(() => users.id).notNull(),
+  role: text("role").notNull().default("viewer"), // viewer | analyst | admin
+  joinedAt: timestamp("joined_at").defaultNow(),
+});
+
+// VULN: token generated with Math.random() — predictable (same class as #13).
+// VULN: role stored here AND read from URL param on accept — param wins, enabling escalation.
+export const workspaceInvitations = pgTable("workspace_invitations", {
+  id: serial("id").primaryKey(),
+  workspaceId: integer("workspace_id").references(() => workspaces.id).notNull(),
+  email: text("email").notNull(),
+  // Intended role set by inviter — but POST /api/invitations/:token/accept reads ?role= from URL instead
+  role: text("role").notNull().default("viewer"),
+  // VULN: Math.random().toString(36) token — 11 chars, ~3.6 trillion combos but brute-forceable
+  token: text("token").notNull().unique(),
+  createdAt: timestamp("created_at").defaultNow(),
+  acceptedAt: timestamp("accepted_at"),
+  acceptedByUserId: integer("accepted_by_user_id").references(() => users.id),
+});
+
+export type Workspace = typeof workspaces.$inferSelect;
+export type WorkspaceMember = typeof workspaceMembers.$inferSelect;
+export type WorkspaceInvitation = typeof workspaceInvitations.$inferSelect;
+export const insertWorkspaceSchema = createInsertSchema(workspaces).omit({ id: true, createdAt: true });
+export const insertWorkspaceMemberSchema = createInsertSchema(workspaceMembers).omit({ id: true, joinedAt: true });
+export const insertWorkspaceInvitationSchema = createInsertSchema(workspaceInvitations).omit({ id: true, createdAt: true, acceptedAt: true, acceptedByUserId: true });
+
 export const PLANS = {
   free:       { name: "Explorer",    price: 0,   perks: "Standard shipping, 30-day returns" },
   pro:        { name: "Member",      price: 9,   perks: "Free shipping, priority support, 5% off" },
