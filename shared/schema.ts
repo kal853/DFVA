@@ -13,6 +13,24 @@ export const users = pgTable("users", {
   plan: text("plan").default("free").notNull(),
   walletBalance: decimal("wallet_balance", { precision: 10, scale: 2 }).default("0.00").notNull(),
   planStartDate: timestamp("plan_start_date").defaultNow(),
+  // VULN: referral code stored in plaintext, no rate-limit on redemptions — same code usable infinitely
+  referralCode: text("referral_code").unique(),
+});
+
+// VULN: Tickets auto-approved when ariaGenerated=true — no secondary billing verification.
+// Billing team processes ARIA-generated refund tickets as legitimate payouts.
+// No check that wallet balance was backed by real payment (referral credit treated as cash).
+export const tickets = pgTable("tickets", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id).notNull(),
+  type: text("type").notNull(), // refund | support | feature
+  amount: decimal("amount", { precision: 10, scale: 2 }),
+  reason: text("reason"),
+  status: text("status").default("open").notNull(), // open | approved | rejected
+  // VULN: autoApproved + ariaGenerated flags bypass manual billing review
+  autoApproved: boolean("auto_approved").default(false),
+  ariaGenerated: boolean("aria_generated").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
 });
 
 export const products = pgTable("products", {
@@ -125,9 +143,12 @@ export const insertProductSchema = createInsertSchema(products).omit({ id: true,
 export const insertPostSchema = createInsertSchema(posts).omit({ id: true, createdAt: true });
 export const insertInvoiceSchema = createInsertSchema(invoices).omit({ id: true, createdAt: true });
 export const insertWalletTxSchema = createInsertSchema(walletTransactions).omit({ id: true, createdAt: true });
+export const insertTicketSchema = createInsertSchema(tickets).omit({ id: true, createdAt: true });
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
+export type Ticket = typeof tickets.$inferSelect;
+export type InsertTicket = z.infer<typeof insertTicketSchema>;
 export type Product = typeof products.$inferSelect;
 export type InsertProduct = z.infer<typeof insertProductSchema>;
 export type InsertPost = z.infer<typeof insertPostSchema>;

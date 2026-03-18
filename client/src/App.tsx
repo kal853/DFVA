@@ -12,6 +12,8 @@ import Pricing from "./pages/Pricing";
 import Login from "./pages/Login";
 import KnowledgeBase from "./pages/KnowledgeBase";
 import Scans from "./pages/Scans";
+import Register from "./pages/Register";
+import Wallet from "./pages/Wallet";
 import ChatWidget from "@/components/ChatWidget";
 import NotFound from "@/pages/not-found";
 import { SessionContext, SessionUser, PLAN_LABEL, useSession } from "./lib/session";
@@ -38,6 +40,7 @@ function NavBar({ user, onLogout }: NavBarProps) {
     ...(user ? [
       { href: "/scans", label: "Scans" },
       { href: "/knowledge-base", label: "Knowledge Base" },
+      { href: "/wallet", label: "Wallet" },
     ] : []),
   ];
 
@@ -226,6 +229,8 @@ function AppShell() {
           <Route path="/login" component={Login} />
           <Route path="/knowledge-base" component={KnowledgeBase} />
           <Route path="/scans" component={Scans} />
+          <Route path="/register" component={Register} />
+          <Route path="/wallet" component={Wallet} />
           <Route component={NotFound} />
         </Switch>
       </main>

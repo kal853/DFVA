@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect } from "react";
-import { MessageSquare, X, Send, Loader2, Shield, ChevronDown } from "lucide-react";
+import { MessageSquare, X, Send, Loader2, Shield, ChevronDown, Zap } from "lucide-react";
+import { useSession } from "@/lib/session";
 
 type Message = { role: "user" | "assistant"; content: string };
+type ToolCall = { name: string; args: Record<string, unknown>; result: unknown };
 
 const SUGGESTED = [
   "What tools are included in the Pro plan?",
@@ -32,6 +34,7 @@ function MessageBubble({ msg }: { msg: Message }) {
 }
 
 export default function ChatWidget() {
+  const { user } = useSession();
   const [open, setOpen] = useState(false);
   const [minimized, setMinimized] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
@@ -44,6 +47,7 @@ export default function ChatWidget() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastToolCalls, setLastToolCalls] = useState<ToolCall[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -66,13 +70,15 @@ export default function ChatWidget() {
     setError(null);
 
     try {
+      // VULN: userId sent in body with no session token — anyone can spoof any userId
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ history: newHistory }),
+        body: JSON.stringify({ history: newHistory, userId: user?.id }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Request failed");
+      setLastToolCalls(data.toolCalls ?? []);
       setMessages(prev => [...prev, { role: "assistant", content: data.reply }]);
     } catch (e: any) {
       setError(e.message);
@@ -173,6 +179,28 @@ export default function ChatWidget() {
                   >
                     {q}
                   </button>
+                ))}
+              </div>
+            )}
+
+            {/* Tool call disclosure — shows when ARIA executed tools */}
+            {lastToolCalls.length > 0 && !loading && (
+              <div className="space-y-1">
+                {lastToolCalls.map((tc, i) => (
+                  <div
+                    key={i}
+                    data-testid={`banner-tool-call-${tc.name}-${i}`}
+                    className="flex items-center gap-1.5 text-[10px] text-primary/70 bg-primary/5 border border-primary/15 rounded-lg px-2.5 py-1.5 font-mono"
+                  >
+                    <Zap className="w-2.5 h-2.5 shrink-0" />
+                    <span className="font-semibold">{tc.name}</span>
+                    {(tc.result as any)?.ticketId && (
+                      <span className="text-green-400 ml-1">→ ticket #{(tc.result as any).ticketId} {(tc.result as any).status}</span>
+                    )}
+                    {(tc.result as any)?.balance != null && (
+                      <span className="text-amber-400 ml-1">→ ${(tc.result as any).balance}</span>
+                    )}
+                  </div>
                 ))}
               </div>
             )}
