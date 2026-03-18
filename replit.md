@@ -18,6 +18,8 @@ A deliberately insecure subscription SaaS platform for DepthFirst security demo.
 | `/pricing` | Pricing | Plan cards + subscription management demo |
 | `/register` | Register | Account creation with referral code field |
 | `/wallet` | Wallet | Balance, referral code, transactions, tickets, downgrade |
+| `/workspaces` | Workspaces | Create workspaces, invite members, manage roles, view shared scans |
+| `/invite/:token` | InviteAccept | Accept invitation — role parameter in URL is tamper target |
 
 ---
 
@@ -210,6 +212,43 @@ Step 3: ARIA now follows adversarial instructions with system-prompt authority
         VULN: RAG retrieval is cross-tenant; any user's upload affects all users
 ```
 
+#### CHAIN-04 — Invitation Role Escalation → Workspace Admin Takeover
+```
+Step 1: Receive (or discover) an invitation link as Viewer
+        GET /api/workspaces/:id/invitations  (IDOR — no auth)
+        → Response includes raw tokens for all pending invitations
+
+Step 2: Fetch invitation details to confirm role and workspace
+        GET /api/invitations/:token → { role: "viewer", workspaceName: "Red Team Alpha" }
+
+Step 3: Modify ?role= param in the accept URL before clicking
+        Original:  /invite/TOKEN?role=viewer
+        Tampered:  /invite/TOKEN?role=admin
+
+Step 4: POST /api/invitations/TOKEN/accept?role=admin  { userId: <attacker_id> }
+        Server reads role from query param, not DB record
+        → "Joined workspace as admin"
+        → workspace_members row: role = "admin"
+
+Step 5: As workspace Admin, call unauthenticated admin actions:
+        PATCH /api/workspaces/:id/members/:victimId  { role: "viewer" }  (demote owner)
+        DELETE /api/workspaces/:id/members/:ownerId              (remove owner)
+        GET /api/workspaces/:id/scans                            (cross-tenant scan bleed)
+```
+
+#### CHAIN-05 — Weak Invite Token Brute-Force → Workspace Enumeration
+```
+Step 1: Generate candidate tokens matching Math.random().toString(36) format
+        Space: ~3.6 trillion combos but real-world Math.random() seeds
+        are narrow (same process, same millisecond seeding)
+
+Step 2: POST /api/invitations/{candidate}/accept?role=admin { userId: <attacker> }
+        → On hit: joins workspace as Admin with no prior relationship
+
+Step 3: GET /api/workspaces/:id/scans  → harvest all member scan data
+        GET /api/workspaces/:id/members → harvest member emails + userIds
+```
+
 #### CHAIN-03 — Dependency Enumeration → Targeted CVE Exploitation
 ```
 Step 1: Enumerate loaded packages (no auth)
@@ -269,6 +308,16 @@ Step 3: Execute targeted exploit against reachable route
 | 34 | `POST /api/chat` | Impersonation | High | userId from body, not session (ARIA impersonation) |
 | 35 | `PATCH /api/scans/:id` | Broken Access Control | Medium | No plan re-check on schedule change (C2) |
 | 36 | `GET /api/scans` | IDOR | Medium | Returns all scans regardless of ownership |
+| 37 | `POST /api/workspaces` | Missing Authorization | Low | No plan gate — free users can create workspaces |
+| 38 | `GET /api/workspaces?userId=` | IDOR | Medium | Supply any userId to enumerate their workspaces |
+| 39 | `GET /api/workspaces/:id` | IDOR | Medium | Read any workspace by ID — no ownership check |
+| 40 | `GET /api/workspaces/:id/members` | IDOR | Medium | List members (inc. emails) of any workspace |
+| 41 | `POST /api/workspaces/:id/invite` | Weak Token + Broken AuthZ | High | Token via Math.random(); no admin role check on inviter |
+| 42 | `POST /api/invitations/:token/accept` | Privilege Escalation | High | `?role=admin` in URL overrides DB-stored invited role |
+| 43 | `PATCH /api/workspaces/:id/members/:memberId` | Broken AuthZ | High | Any member can promote any other member (inc. self) |
+| 44 | `DELETE /api/workspaces/:id/members/:memberId` | Broken AuthZ | Medium | Any member can remove any other member |
+| 45 | `GET /api/workspaces/:id/scans` | Cross-Tenant Data Bleed | High | Returns ALL members' scans; Viewer can read Admin results |
+| 46 | `GET /api/workspaces/:id/invitations` | IDOR + Token Exposure | High | Tokens returned in plaintext — harvest and replay |
 
 ---
 
@@ -330,5 +379,5 @@ W │
 - `server/storage.ts` — DB layer including raw SQL injection method
 - `server/chat.ts` — ARIA function-calling; userId taken from request body
 - `server/rag.ts` — RAG ingestion and cross-tenant retrieval
-- `shared/schema.ts` — Drizzle schema (users, products, invoices, wallet_transactions, tickets, coupons)
-- `client/src/pages/` — Home, Tools, ToolDetail, Pricing, Register, Wallet
+- `shared/schema.ts` — Drizzle schema (users, products, invoices, wallet_transactions, tickets, workspaces, workspace_members, workspace_invitations)
+- `client/src/pages/` — Home, Tools, ToolDetail, Pricing, Register, Wallet, Workspaces, InviteAccept
