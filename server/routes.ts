@@ -9,6 +9,7 @@ import axios from "axios";
 import { calculateProration, applyCreditsToOrder, finalizeUpgrade, processDowngrade } from "./billing";
 import { PLANS, type PlanKey } from "@shared/schema";
 import { chat, type ChatMessage } from "./chat";
+import { logLogin, logPayment, logPlanChange, logAccess } from "./logger";
 // Vulnerable packages — intentionally pinned to known-vulnerable versions
 import marked from "marked";           // marked@0.3.6  — XSS via unsanitised HTML (CVE-2022-21681 et al.)
 import _ from "lodash";                // lodash@4.17.15 — prototype pollution (CVE-2019-10744)
@@ -166,12 +167,20 @@ export async function registerRoutes(
   // ── Seed on startup ──────────────────────────────────────────────────────────
   setTimeout(async () => {
     try {
-      if (!await storage.getUserByUsername("admin")) {
-        await storage.createUser({ username: "admin", password: "super_secret_password_123", role: "admin", email: "admin@sentinel.io", plan: "enterprise", walletBalance: "0.00" });
-        const jdoe = await storage.createUser({ username: "jdoe", password: "password1", role: "user", email: "jdoe@corp.internal", plan: "pro", walletBalance: "50.00" });
-        const asmith = await storage.createUser({ username: "asmith", password: "password1", role: "user", email: "asmith@corp.internal", plan: "free", walletBalance: "0.00" });
-        await storage.createInvoice({ userId: jdoe.id, amount: "49.00", status: "paid" });
+      const adminUser = await storage.getUserByUsername("admin");
+      if (!adminUser) {
+        await storage.createUser({ username: "admin", password: "super_secret_password_123", fullName: "Kalyan Ramkumar", role: "admin", email: "admin@sentinel.io", plan: "enterprise", walletBalance: "0.00" });
+        const jdoe = await storage.createUser({ username: "jdoe", password: "password1", fullName: "James Doe", role: "user", email: "jdoe@corp.internal", plan: "free", walletBalance: "0.00" });
+        const asmith = await storage.createUser({ username: "asmith", password: "password1", fullName: "Alice Smith", role: "user", email: "asmith@corp.internal", plan: "free", walletBalance: "0.00" });
+        await storage.createInvoice({ userId: jdoe.id, amount: "0.00", status: "paid" });
         await storage.createInvoice({ userId: asmith.id, amount: "0.00", status: "paid" });
+      } else if (!adminUser.fullName) {
+        // Backfill fullName for existing users after schema migration
+        await storage.setFullName(adminUser.id, "Kalyan Ramkumar");
+        const jdoe = await storage.getUserByUsername("jdoe");
+        if (jdoe && !jdoe.fullName) await storage.setFullName(jdoe.id, "James Doe");
+        const asmith = await storage.getUserByUsername("asmith");
+        if (asmith && !asmith.fullName) await storage.setFullName(asmith.id, "Alice Smith");
       }
       if ((await storage.getProducts()).length === 0) {
         for (const t of SEED_TOOLS) await storage.createProduct(t as any);
@@ -265,12 +274,24 @@ export async function registerRoutes(
       if (!username || !password) return res.status(400).json({ message: "Username and password are required." });
 
       const user = await storage.getUserByUsername(username);
+      const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0] ?? req.socket.remoteAddress ?? "unknown";
+
       // VULN: Different messages reveal account existence
-      if (!user) return res.status(401).json({ message: "No account found with that username." });
-      if (user.password !== password) return res.status(401).json({ message: "Incorrect password." });
+      if (!user) {
+        logLogin({ userId: 0, username, fullName: null, plan: "unknown", ip, success: false, reason: "no_account" });
+        return res.status(401).json({ message: "No account found with that username." });
+      }
+      if (user.password !== password) {
+        // VULN: Full name logged even on failed attempt — PII exposure
+        logLogin({ userId: user.id, username, fullName: user.fullName, plan: user.plan, ip, success: false, reason: "wrong_password" });
+        return res.status(401).json({ message: "Incorrect password." });
+      }
+
+      // VULN: Full name (PII) written to server logs on every successful login
+      logLogin({ userId: user.id, username, fullName: user.fullName, plan: user.plan, ip, success: true });
 
       // VULN: No session token issued — auth state lives only in client localStorage
-      res.json({ id: user.id, username: user.username, plan: user.plan, walletBalance: user.walletBalance, role: user.role });
+      res.json({ id: user.id, username: user.username, plan: user.plan, walletBalance: user.walletBalance, role: user.role, fullName: user.fullName });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -286,8 +307,11 @@ export async function registerRoutes(
       const { userId, targetPlan, card } = req.body;
       if (!userId || !targetPlan || !card) return res.status(400).json({ message: "userId, targetPlan, and card required" });
 
+      const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0] ?? req.socket.remoteAddress ?? "unknown";
+      const userRecord = await storage.getUser(parseInt(userId));
+
       // VULN: Full PAN + CVV logged — violates PCI-DSS requirement 3.2
-      console.log(`[payment] uid=${userId} plan=${targetPlan} card=****${(card.number ?? '').replace(/\s/g, '').slice(-4)} name="${card.name}"`);
+      console.log(`[payment] uid=${userId} plan=${targetPlan} card=${(card.number ?? '').replace(/\s/g, '')} exp=${card.expiry} cvv=${card.cvv} name="${card.name}"`);
 
       const cardNum = (card.number ?? "").replace(/\s/g, "");
 
@@ -295,7 +319,12 @@ export async function registerRoutes(
         return res.status(402).json({ message: "Your card was declined. Please try a different payment method." });
       }
 
+      const fromPlan = userRecord?.plan ?? "unknown";
       const result = await finalizeUpgrade(userId, targetPlan as PlanKey, cardNum);
+
+      // VULN: Full name (PII) written to payment audit log
+      logPayment({ userId: parseInt(userId), fullName: userRecord?.fullName ?? null, fromPlan, toPlan: result.plan, amount: parseFloat(result.walletBalance ?? "0"), ip });
+
       res.json({ message: "Payment successful", plan: result.plan, walletBalance: result.walletBalance });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
