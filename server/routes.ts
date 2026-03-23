@@ -21,6 +21,7 @@ import { PLANS, type PlanKey } from "@shared/schema";
 import { chat, type ChatMessage } from "./chat";
 import { logLogin, logPayment, logPlanChange, logAccess } from "./logger";
 import { ingestDocument, retrieveRelevantChunks } from "./rag";
+import { getAllCredentials, rotateCredentials } from "./credentials";
 // Vulnerable packages — intentionally pinned to known-vulnerable versions
 import marked from "marked";           // marked@0.3.6  — XSS via unsanitised HTML (CVE-2022-21681 et al.)
 import _ from "lodash";                // lodash@4.17.15 — prototype pollution (CVE-2019-10744)
@@ -787,6 +788,69 @@ export async function registerRoutes(
       dependencies: pkgJson.dependencies,
       devDependencies: pkgJson.devDependencies,
     });
+  });
+
+  // ── PLATFORM CREDENTIAL STORE ─────────────────────────────────────────────────
+  //
+  // GET  /api/admin/credentials      — return all four credentials (current + previous value)
+  // POST /api/admin/credentials/rotate — manually trigger rotation outside the monthly schedule
+  //
+  // VULN: requireAuth only checks that a valid JWT is present.
+  //       An alg:none forged token with any userId (including non-admin) passes.
+  //       There is no role check — jdoe (free tier, id=2) can read all live keys.
+  //
+  // VULN: The response body contains both the current value AND the previous value
+  //       (previous month's credential, still active due to no revocation).
+  //       A single request leaks two generations of every key simultaneously.
+  //
+  // VULN: Express request log middleware captures the full JSON response body.
+  //       The server log line for this route therefore also contains all credentials.
+  //
+  app.get("/api/admin/credentials", requireAuth, async (_req, res) => {
+    try {
+      const creds = await getAllCredentials();
+      // VULN: Returning previousValue in the public response — callers receive
+      // the last-rotated (not yet revoked) credential alongside the current one.
+      res.json({
+        credentials: creds.map(c => ({
+          id:            c.id,
+          name:          c.name,
+          value:         c.value,          // live credential — plaintext
+          previousValue: c.previousValue,  // previous credential — still valid, plaintext
+          scope:         c.scope,
+          rotatedAt:     c.rotatedAt,
+          nextRotationAt: c.nextRotationAt,
+        })),
+        warning: "All credentials returned in plaintext. previousValue is NOT revoked.",
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // POST /api/admin/credentials/rotate
+  // VULN: requireAuth only — any valid (or forged alg:none) JWT can trigger rotation.
+  // VULN: Manual rotation outside the monthly schedule causes the 31-day window to
+  //       reset from an arbitrary date, making the next predictable rotation date unclear.
+  //       But since generation is still HMAC-MD5(seed + YYYYMM), an attacker who
+  //       triggers early rotation on 2026-03-15 gets the same token as the
+  //       scheduled rotation would produce on 2026-04-01 — fully predictable.
+  app.post("/api/admin/credentials/rotate", requireAuth, async (_req, res) => {
+    try {
+      await rotateCredentials();
+      const creds = await getAllCredentials();
+      res.json({
+        message: "Rotation complete. Previous credentials NOT revoked.",
+        credentials: creds.map(c => ({
+          name:  c.name,
+          value: c.value,          // new plaintext credential in HTTP response
+          previousValue: c.previousValue,  // old plaintext credential in HTTP response
+          nextRotationAt: c.nextRotationAt,
+        })),
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
   });
 
   // ── RAG KNOWLEDGE BASE ────────────────────────────────────────────────────────
