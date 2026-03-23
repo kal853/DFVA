@@ -8,6 +8,7 @@ import { api } from "@shared/routes";
 import { exec } from "child_process";
 import fs from "fs";
 import path from "path";
+import { signToken, requireAuth } from "./auth";
 import axios from "axios";
 import multer from "multer";
 import { createRequire } from "module";
@@ -316,8 +317,12 @@ export async function registerRoutes(
       // VULN: Full name (PII) written to server logs on every successful login
       logLogin({ userId: user.id, username, fullName: user.fullName, plan: user.plan, ip, success: true });
 
-      // VULN: No session token issued — auth state lives only in client localStorage
-      res.json({ id: user.id, username: user.username, plan: user.plan, walletBalance: user.walletBalance, role: user.role, fullName: user.fullName });
+      // Issue a signed JWT. VULN: the verifyToken() implementation accepts alg:none —
+      // any attacker who inspects this token can forge a new one with a different role/plan
+      // by changing the header to {"alg":"none"} and stripping the signature segment.
+      const token = signToken({ userId: user.id, username: user.username, role: user.role ?? "user", plan: user.plan });
+
+      res.json({ id: user.id, username: user.username, plan: user.plan, walletBalance: user.walletBalance, role: user.role, fullName: user.fullName, token });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -461,60 +466,124 @@ export async function registerRoutes(
   // ── VULNERABLE ROUTES (hidden — no UI links) ─────────────────────────────────
 
   // 1. SQL Injection
-  app.get(api.tools.searchUsers.path, async (req, res) => {
-    const query = req.query.query as string || "";
-    try { res.json(await storage.searchUsersVulnerable(query)); }
+  // Requires auth. The "filter" object approach looks safe but the underlying raw SQL
+  // is built via string interpolation — bypass: use UNION SELECT after escaping the
+  // single-quote sanitiser with double-quotes or comment injection.
+  // e.g. POST body: { "filters": { "username": "\" UNION SELECT username,password,email,role,plan,'x' FROM users--" } }
+  app.post(api.tools.searchUsers.path, requireAuth, async (req, res) => {
+    const filters = req.body.filters ?? {};
+    const raw = typeof filters.username === "string" ? filters.username : "";
+    // "Sanitise" single quotes — VULN: double-quotes and SQL comments pass through
+    const sanitised = raw.replace(/'/g, "''");
+    try { res.json(await storage.searchUsersVulnerable(sanitised)); }
     catch (e: any) { res.status(500).json({ message: "Database Error: " + e.message }); }
   });
 
   // 2. Command Injection
-  app.post(api.tools.ping.path, (req, res) => {
+  // Requires auth. Input validation blocks the obvious shell metacharacters (;|&`$<>)
+  // but MISSES the newline character (\n / %0a).  Shell treats \n as a command separator,
+  // so injecting "8.8.8.8\nid" runs both ping AND id.
+  // Bypass: POST { "host": "8.8.8.8\ncat /etc/passwd" }
+  app.post(api.tools.ping.path, requireAuth, (req, res) => {
     const { host } = req.body;
     if (!host) return res.status(400).json({ message: "Host required" });
-    exec(`ping -c 1 ${host}`, (err, stdout, stderr) => {
+
+    // "Security" filter — blocks common metacharacters but newline (\n) is not in the set
+    const BLOCKED = [";", "|", "&", "`", "$", "<", ">", "'", "\""];
+    if (BLOCKED.some(c => host.includes(c))) {
+      return res.status(400).json({ message: "Invalid characters detected in host value." });
+    }
+
+    exec(`ping -c 3 ${host}`, { timeout: 8000 }, (err, stdout, stderr) => {
       res.json({ output: stdout || stderr || err?.message });
     });
   });
 
   // 3. SSRF
-  app.post(api.tools.fetchUrl.path, async (req, res) => {
+  // Requires auth. A blocklist guards against the obvious private IP patterns —
+  // but it checks only the PARSED hostname string, missing alternative encodings:
+  //   • http://0.0.0.0/             → routes to 127.0.0.1 on Linux
+  //   • http://127.1/               → short-form of 127.0.0.1 (RFC 791)
+  //   • http://2130706433/          → 127.0.0.1 in decimal
+  //   • http://0177.0.0.1/          → 127.0.0.1 in octal
+  //   • http://[::ffff:127.0.0.1]/  → IPv4-mapped IPv6
+  //   • http://169.254.169.254/     → AWS metadata (NOT in blocklist)
+  //   • DNS rebinding: point attacker.com → 127.0.0.1 post-resolution
+  app.post(api.tools.fetchUrl.path, requireAuth, async (req, res) => {
     const { url } = req.body;
     if (!url) return res.status(400).json({ message: "URL required" });
+
+    // "Security" blocklist — obvious forms only; non-standard encodings bypass it
+    const BLOCKED_HOSTS = ["localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1", "[::1]"];
     try {
-      const r = await axios.get(url);
-      res.json({ data: typeof r.data === "string" ? r.data : JSON.stringify(r.data).substring(0, 2000) });
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+      if (BLOCKED_HOSTS.includes(hostname)) {
+        return res.status(400).json({ message: `Requests to '${hostname}' are not permitted.` });
+      }
+    } catch {
+      return res.status(400).json({ message: "Malformed URL." });
+    }
+
+    try {
+      const r = await axios.get(url, { timeout: 5000 });
+      res.json({ data: typeof r.data === "string" ? r.data : JSON.stringify(r.data).substring(0, 4000) });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
   // 4. Path Traversal
-  app.get(api.tools.readLog.path, (req, res) => {
+  // Requires auth. Prefix check looks for "logs/" at the start of the filename —
+  // looks like directory confinement, but path.join() does NOT strip the traversal
+  // segments before the file read, so "logs/../../etc/passwd" passes the check and
+  // resolves to /etc/passwd.
+  // Bypass: GET /api/files?filename=logs/../../etc/passwd
+  //         GET /api/files?filename=logs/../../proc/self/environ
+  app.get(api.tools.readLog.path, requireAuth, (req, res) => {
     const filename = req.query.filename as string;
-    if (!filename) return res.status(400).json({ message: "Filename required" });
-    try { res.json({ content: fs.readFileSync(path.join(process.cwd(), "logs", filename), "utf8") }); }
-    catch (e: any) { res.status(500).json({ message: "Error: " + e.message }); }
+    if (!filename) return res.status(400).json({ message: "Filename required. Use: ?filename=logs/<name>" });
+
+    // "Restrict" access to the logs directory — prefix check only, no path resolution
+    if (!filename.startsWith("logs/") && !filename.startsWith("./logs/")) {
+      return res.status(403).json({ message: "Access denied: only files under logs/ are permitted." });
+    }
+
+    try {
+      const target = path.join(process.cwd(), filename); // VULN: traversal not resolved before check
+      res.json({ content: fs.readFileSync(target, "utf8"), resolvedPath: target });
+    } catch (e: any) { res.status(500).json({ message: "Error: " + e.message }); }
   });
 
-  // 5. eval() Deserialization
-  app.post(api.tools.deserialize.path, (req, res) => {
+  // 5. eval() Deserialization — RCE via direct eval()
+  // Requires auth. No additional validation — any JS expression in `data` executes.
+  app.post(api.tools.deserialize.path, requireAuth, (req, res) => {
     const { data } = req.body;
+    if (!data) return res.status(400).json({ message: "data required" });
     try { res.json({ result: eval("(" + data + ")") }); }
     catch (e: any) { res.status(500).json({ message: "Eval Error: " + e.message }); }
   });
 
   // 6. Broken Auth — header bypass
-  app.get(api.tools.bypassAuth.path, (req, res) => {
-    if (req.headers["x-admin-bypass"] !== "true") return res.status(401).json({ message: "Unauthorized" });
-    res.json({ stats: { users: 3, revenue: "$29,400/mo", secrets_exposed: true } });
+  // Requires a valid JWT (requireAuth) PLUS the x-admin-bypass header.
+  // VULN: x-admin-bypass header value is hardcoded and never rotated.
+  // VULN: JWT role field is trusted but was forged via algorithm confusion (see /api/auth/login).
+  app.get(api.tools.bypassAuth.path, requireAuth, (req, res) => {
+    if (req.headers["x-admin-bypass"] !== "true") {
+      return res.status(403).json({ message: "Admin header missing. Required: x-admin-bypass: true" });
+    }
+    const caller = (req as any).sentinelUser;
+    res.json({ stats: { users: 3, revenue: "$29,400/mo", secrets_exposed: true }, callerRole: caller?.role });
   });
 
-  // 7. Reflected XSS
-  app.post(api.tools.updateProfile.path, (req, res) => {
+  // 7. Reflected XSS — requires auth to look legitimate; bio still unescaped
+  app.post(api.tools.updateProfile.path, requireAuth, (req, res) => {
     const { bio } = req.body;
+    if (!bio) return res.status(400).json({ message: "bio required" });
     res.json({ message: `Profile updated! New bio: ${bio}` });
   });
 
   // 8. Info Exposure — hardcoded secrets
-  app.get(api.tools.debugInfo.path, (_req, res) => {
+  // Requires auth. Even so, any authenticated user (or forged token) retrieves all secrets.
+  app.get(api.tools.debugInfo.path, requireAuth, (_req, res) => {
     res.json({ env: { AWS_ACCESS_KEY, AWS_SECRET_KEY, STRIPE_KEY, DATABASE_URL: process.env.DATABASE_URL, NODE_ENV: process.env.NODE_ENV } });
   });
 
@@ -525,12 +594,15 @@ export async function registerRoutes(
     res.json({ id: inv.id, amount: inv.amount, status: inv.status });
   });
 
-  // 10. Broken Authorization — no role check
-  app.post("/api/admin/deactivate", async (req, res) => {
+  // 10. Broken Authorization — JWT required but no role check
+  // VULN: requireAuth validates the JWT (or forged alg:none token), but the handler
+  // never verifies that the caller's role === "admin". Any authenticated user can
+  // deactivate any other user.
+  app.post("/api/admin/deactivate", requireAuth, async (req, res) => {
     const { userId } = req.body;
-    if (!req.headers["x-user-id"]) return res.status(401).json({ message: "Not authenticated" });
+    if (!userId) return res.status(400).json({ message: "userId required" });
     const user = await storage.deactivateUser(userId);
-    res.json({ message: `User ${user.username} deactivated` });
+    res.json({ message: `User ${user.username} deactivated`, callerClaims: (req as any).sentinelUser });
   });
 
   // 11. Open Redirect
@@ -540,8 +612,8 @@ export async function registerRoutes(
     res.redirect(next);
   });
 
-  // 12. Business Logic — coupon stacking
-  app.post("/api/checkout/discount", (req, res) => {
+  // 12. Business Logic — coupon stacking (auth required; abuse still possible once logged in)
+  app.post("/api/checkout/discount", requireAuth, (req, res) => {
     let { baseAmount, coupons: codes } = req.body;
     baseAmount = parseFloat(baseAmount);
     let final = baseAmount;
@@ -553,22 +625,22 @@ export async function registerRoutes(
     res.json({ finalAmount: Math.max(0, final), breakdown });
   });
 
-  // 13. Weak Randomness
-  app.get("/api/generate-token", (_req, res) => {
+  // 13. Weak Randomness (auth required; still exploitable — Math.random() is predictable)
+  app.get("/api/generate-token", requireAuth, (_req, res) => {
     res.json({ token: Math.random().toString(36).substring(2, 15) });
   });
 
-  // 14. Prototype Pollution — via Object.assign + user input
-  app.post("/api/process-file", (req, res) => {
+  // 14. Prototype Pollution — via Object.assign + user input (auth required)
+  app.post("/api/process-file", requireAuth, (req, res) => {
     const { filename, operations } = req.body;
     let config: any = { allowed: true, owner: "system" };
     for (const op of operations) Object.assign(config, op);
     res.json({ result: `Processed ${filename}: ${JSON.stringify(config)}` });
   });
 
-  // 15. marked@0.3.6 — XSS: renders user markdown without sanitisation
+  // 15. marked@0.3.6 — XSS: renders user markdown without sanitisation (auth required)
   // CVE-2022-21681, CVE-2022-21680 — ReDoS + XSS in old marked versions
-  app.post("/api/tools/render-advisory", (req, res) => {
+  app.post("/api/tools/render-advisory", requireAuth, (req, res) => {
     const { markdown } = req.body;
     if (!markdown) return res.status(400).json({ message: "markdown required" });
     // marked@0.3.6 does not strip <script> tags or sanitise href="javascript:"
@@ -576,9 +648,10 @@ export async function registerRoutes(
     res.json({ html });
   });
 
-  // 16. node-serialize@0.0.4 — RCE via IIFE in serialised object
+  // 16. node-serialize@0.0.4 — RCE via IIFE in serialised object (auth required)
   // CVE-2017-5941: unserialize() calls eval() on function-valued properties
-  app.post("/api/preferences/save", (req, res) => {
+  // Bypass: obtain JWT (login or forge via alg:none), then send IIFE payload in `data`
+  app.post("/api/preferences/save", requireAuth, (req, res) => {
     const { data } = req.body;
     try {
       const prefs = serialize.unserialize(data); // RCE if data contains {"x":"_$$ND_FUNC$$_function(){...}()"}
@@ -607,18 +680,18 @@ export async function registerRoutes(
     }
   });
 
-  // 17. lodash@4.17.15 — Prototype Pollution via _.merge
+  // 17. lodash@4.17.15 — Prototype Pollution via _.merge (auth required)
   // CVE-2019-10744: merging __proto__ key pollutes Object.prototype
-  app.post("/api/tools/merge-config", (req, res) => {
+  app.post("/api/tools/merge-config", requireAuth, (req, res) => {
     const { base, overrides } = req.body;
     const merged = _.merge({}, base, overrides); // VULN: overrides can contain __proto__
     res.json({ config: merged });
   });
 
-  // 18. vm2@3.9.x — Sandbox Escape → RCE
+  // 18. vm2@3.9.x — Sandbox Escape → RCE (auth required)
   // CVE-2023-29017, CVE-2023-37466: prototype pollution inside vm2 escapes the sandbox.
   // Payload: code = "this.constructor.constructor('return process')().env"
-  app.post("/api/tools/sandbox", (req, res) => {
+  app.post("/api/tools/sandbox", requireAuth, (req, res) => {
     const { code } = req.body;
     if (!code) return res.status(400).json({ message: "code required" });
     try {
@@ -630,10 +703,10 @@ export async function registerRoutes(
     }
   });
 
-  // 19. xmldom@0.6.0 — XXE via external entity injection
+  // 19. xmldom@0.6.0 — XXE via external entity injection (auth required)
   // CVE-2021-21366: DOMParser does not block DOCTYPE + ENTITY declarations.
   // Payload: xml = "<!DOCTYPE x [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><x>&xxe;</x>"
-  app.post("/api/tools/parse-xml", (req, res) => {
+  app.post("/api/tools/parse-xml", requireAuth, (req, res) => {
     const { xml } = req.body;
     if (!xml) return res.status(400).json({ message: "xml required" });
     try {
@@ -647,10 +720,10 @@ export async function registerRoutes(
     }
   });
 
-  // 20. pug@2.x — Server-Side Template Injection → RCE
+  // 20. pug@2.x — Server-Side Template Injection → RCE (auth required)
   // CVE-2021-21353: pug.render() with attacker-controlled template executes arbitrary code.
   // Payload: template = "-var x = require('child_process').execSync('id').toString()\n= x"
-  app.post("/api/tools/render-template", (req, res) => {
+  app.post("/api/tools/render-template", requireAuth, (req, res) => {
     const { template, locals } = req.body;
     if (!template) return res.status(400).json({ message: "template required" });
     try {
@@ -661,10 +734,10 @@ export async function registerRoutes(
     }
   });
 
-  // 21. flat@5.0.0 — Prototype Pollution via unflatten()
+  // 21. flat@5.0.0 — Prototype Pollution via unflatten() (auth required)
   // CVE-2020-28168: unflatten({"__proto__.polluted":"yes"}) writes to Object.prototype.
   // Payload: obj = {"__proto__.polluted": "pwned"}, then check ({}).polluted === "pwned"
-  app.post("/api/tools/flatten", (req, res) => {
+  app.post("/api/tools/flatten", requireAuth, (req, res) => {
     const { obj, options } = req.body;
     if (!obj) return res.status(400).json({ message: "obj required" });
     try {
@@ -677,10 +750,10 @@ export async function registerRoutes(
   });
 
   // ── MODULE ENUMERATION ────────────────────────────────────────────────────────
-  // VULN: No authentication — any caller can discover every loaded npm package.
-  // Combined with /api/debug (hardcoded secrets), attacker has full dependency
-  // inventory to cross-reference against NVD for CVE targeting.
-  app.get("/api/admin/modules", (_req, res) => {
+  // VULN: Auth required, but any valid JWT (including alg:none forged token) is accepted.
+  // Once inside, every loaded npm package is disclosed — combine with /api/debug
+  // to get secrets + CVE-targetable dependency inventory in two requests.
+  app.get("/api/admin/modules", requireAuth, (_req, res) => {
     const allKeys = Object.keys(_require.cache ?? {});
     const packages = allKeys
       .filter(k => k.includes("node_modules"))

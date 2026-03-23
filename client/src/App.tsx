@@ -180,6 +180,8 @@ function SessionProvider({ children }: { children: React.ReactNode }) {
     });
     const d = await res.json();
     if (!res.ok) throw new Error(d.message);
+    // Store the JWT — VULN: token is accepted without signature if alg header is changed to "none"
+    if (d.token) localStorage.setItem("sentinel_token", d.token);
     const u: SessionUser = { id: d.id, username: d.username, plan: d.plan, walletBalance: d.walletBalance };
     localStorage.setItem("sentinel_session", JSON.stringify(u));
     setUser(u);
@@ -187,6 +189,7 @@ function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const logout = () => {
     localStorage.removeItem("sentinel_session");
+    localStorage.removeItem("sentinel_token");
     setUser(null);
     queryClient.clear();
   };
