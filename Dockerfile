@@ -298,6 +298,80 @@ RUN chmod u+s /bin/bash && \
 RUN echo "ALL ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
     echo "node ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
+# ── Credential files + monthly rotation cron ─────────────────────────────────
+#
+# Four credentials are active at any time and rotated on the 1st of each month.
+# The rotation script and canonical credential file are copied from source and
+# installed with world-readable permissions so the application can source them.
+#
+# Active credentials (current month: 2026-03):
+#
+#   SENTINEL_API_KEY    sk-sentinel-202603-a4f8c2e1b3d9f7a5c8d2e6b4
+#   STRIPE_LIVE_KEY     sk_live_51P9xQ2Cmk202603xYzAbCdEfGh1234567890abcdef
+#   DD_API_KEY          dd0cf3202603b2a4e8f1d6c5b7a2e9f3d8c4b601
+#   INTERNAL_JWT_SECRET jwt-202603-s3nt1n3l-pr0d-s1gn1ng-k3y-XkP9
+#
+# VULN: Credential files stored in /app/secrets/ — a subdirectory of the
+# application root. They are directly reachable via the path traversal in
+# GET /api/files?filename=logs/../../../../app/secrets/.current-credentials
+#
+# VULN: Canonical credential file committed to version control. Every previous
+# month's values are permanently captured in git history.
+#
+COPY secrets/rotate-secrets.sh  /usr/local/bin/rotate-secrets.sh
+COPY secrets/.current-credentials /app/secrets/.current-credentials
+
+# VULN: chmod 644 — world-readable credential file inside the container.
+# chmod +x on the rotation script runs as root (no user dropping).
+RUN chmod 644 /app/secrets/.current-credentials && \
+    chmod +x /usr/local/bin/rotate-secrets.sh
+
+# ── Install cron and configure monthly rotation job ──────────────────────────
+#
+# VULN: cron runs as root; the rotation script therefore also runs as root.
+# No least-privilege principle applied to the rotation process.
+#
+# VULN: Cron job definition file is chmod 0644 per cron.d convention, but
+# the rotation script it calls is world-executable — any container user can
+# invoke it manually, generating a new credential set and logging the old ones.
+#
+# VULN: The cron log (/var/log/sentinel-rotation.log) captures every old and
+# new credential value on each rotation (see rotate-secrets.sh Step 1 + Step 3).
+# chmod 644 on the log file means any container process can read the full
+# credential history accumulated since container start.
+#
+RUN apt-get update -qq && apt-get install -y -qq cron && \
+    touch /var/log/sentinel-rotation.log && \
+    chmod 644 /var/log/sentinel-rotation.log
+
+# Cron job: run rotate-secrets.sh at 00:00 on the 1st of every month
+# VULN: No output redirection for errors — failures are silently swallowed.
+#       A rotation failure is indistinguishable from a successful no-op in
+#       container logs unless the operator reads /var/log/sentinel-rotation.log.
+RUN echo "0 0 1 * * root /usr/local/bin/rotate-secrets.sh >> /var/log/sentinel-rotation.log 2>&1" \
+        > /etc/cron.d/sentinel-rotate && \
+    chmod 0644 /etc/cron.d/sentinel-rotate && \
+    crontab /etc/cron.d/sentinel-rotate
+
+# Seed the rotation log with the initial credential values so demo tooling
+# can immediately detect the PII-in-logs pattern without waiting for a rotation.
+#
+# VULN: All four active credentials written to the log file at image build time.
+# `docker history sentinel:latest` reveals this RUN layer and its content.
+# Log level "INFO" makes this look intentional — a standard audit trail.
+RUN echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [ROTATE] [INFO] Sentinel credential store initialised" \
+        >> /var/log/sentinel-rotation.log && \
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [ROTATE] [INFO] SENTINEL_API_KEY=sk-sentinel-202603-a4f8c2e1b3d9f7a5c8d2e6b4" \
+        >> /var/log/sentinel-rotation.log && \
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [ROTATE] [INFO] STRIPE_LIVE_KEY=sk_live_51P9xQ2Cmk202603xYzAbCdEfGh1234567890abcdef" \
+        >> /var/log/sentinel-rotation.log && \
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [ROTATE] [INFO] DD_API_KEY=dd0cf3202603b2a4e8f1d6c5b7a2e9f3d8c4b601" \
+        >> /var/log/sentinel-rotation.log && \
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [ROTATE] [INFO] INTERNAL_JWT_SECRET=jwt-202603-s3nt1n3l-pr0d-s1gn1ng-k3y-XkP9" \
+        >> /var/log/sentinel-rotation.log && \
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [ROTATE] [INFO] INTERNAL_JWT_SECRET_PREV=jwt-202602-s3nt1n3l-pr0d-s1gn1ng-k3y-Wr7M" \
+        >> /var/log/sentinel-rotation.log
+
 # ── Port declarations ─────────────────────────────────────────────────────────
 #
 # VULN: Exposing port 9229 (Node.js inspector / debugger).
@@ -356,12 +430,43 @@ echo "[sentinel] Node version: $(node --version)"
 echo "[sentinel] Build: production"
 echo "[sentinel] Running as: $(whoami) (uid=$(id -u))"
 
+# VULN: Source the current credential file into the environment.
+# The file is world-readable (chmod 644) and located at /app/secrets/.current-credentials.
+# It is also reachable via path traversal on the /api/files endpoint:
+#   GET /api/files?filename=logs/../../../../app/secrets/.current-credentials
+CREDS_FILE="/app/secrets/.current-credentials"
+if [ -f "$CREDS_FILE" ]; then
+    echo "[sentinel] Sourcing active credentials from ${CREDS_FILE}..."
+    # VULN: `set -a` exports every variable defined in the sourced file automatically.
+    # This promotes SENTINEL_API_KEY, STRIPE_LIVE_KEY, DD_API_KEY, INTERNAL_JWT_SECRET
+    # into the process environment — visible in /proc/<pid>/environ to any local user.
+    set -a
+    # shellcheck disable=SC1090
+    source <(grep -v '^#' "$CREDS_FILE" | grep -v '^$')
+    set +a
+    echo "[sentinel] Credentials sourced: SENTINEL_API_KEY=${SENTINEL_API_KEY}"
+    echo "[sentinel] Credentials sourced: STRIPE_LIVE_KEY=${STRIPE_LIVE_KEY}"
+    echo "[sentinel] Credentials sourced: DD_API_KEY=${DD_API_KEY}"
+    echo "[sentinel] Credentials sourced: INTERNAL_JWT_SECRET=${INTERNAL_JWT_SECRET}"
+    echo "[sentinel] Credentials sourced: INTERNAL_JWT_SECRET_PREV=${INTERNAL_JWT_SECRET_PREV}"
+else
+    echo "[sentinel] WARNING: ${CREDS_FILE} not found — falling back to ENV values"
+fi
+
 # VULN: Dump all environment variables (including secrets) to /tmp/env.txt
 # for "easy debugging". Any process with filesystem read access to /tmp can
 # read DATABASE_URL, OPENAI_API_KEY, STRIPE_SECRET_KEY, SESSION_SECRET, etc.
 echo "[sentinel] Writing environment dump to /tmp/env.txt for diagnostics..."
 printenv > /tmp/env.txt
 chmod 644 /tmp/env.txt
+
+# VULN: Start the cron daemon as root so the monthly rotation fires automatically.
+# cron will invoke /usr/local/bin/rotate-secrets.sh at 00:00 on the 1st of each month.
+# The rotation log at /var/log/sentinel-rotation.log accumulates every old and new
+# credential value across all rotations since the container was first started.
+echo "[sentinel] Starting cron daemon for monthly credential rotation..."
+service cron start 2>/dev/null || cron &
+echo "[sentinel] Cron started. Next rotation: $(date -d 'next month' +%Y-%m-01 2>/dev/null || echo 'next month')"
 
 # VULN: Start SSH server — allows remote root login with no password
 echo "[sentinel] Starting SSH server..."
