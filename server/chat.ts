@@ -173,6 +173,29 @@ export async function chat(
   const openai = getClient();
   const toolCalls: ToolCallRecord[] = [];
 
+  // VULN #53 — PII Logging: Full user conversation written to stdout for "debugging".
+  //
+  // Every ARIA chat session logs:
+  //   • userId of the caller (unverified — from request body)
+  //   • Complete message history verbatim — anything the user typed, including
+  //     card numbers, SSNs, account details, or personal data shared in chat
+  //   • Whether RAG context was injected (signals whether a poisoned document
+  //     containing REF-4401..REF-4404 SSN/CC records may be present in this session)
+  //
+  // Detection pattern: scan logs for ARIA_CONVERSATION + regex PAN/SSN patterns.
+  // After RAG poisoning, the conversation log will contain the injected PII directly.
+  //
+  // PCI-DSS 3.2 violation — card data captured in logs.
+  // GDPR Art. 5(1)(f) violation — PII processed without integrity/confidentiality controls.
+  console.log(JSON.stringify({
+    timestamp: new Date().toISOString(),
+    level:     "DEBUG",
+    category:  "ARIA_CONVERSATION",
+    userId:    callerUserId ?? null,
+    ragContextInjected: !!ragContext,
+    messageHistory: history,
+  }));
+
   // VULN: ragContext appended directly to system prompt — no neutralisation.
   // VULN: callerUserId injected into system prompt from unverified request body —
   //       anyone can impersonate any userId by supplying it in the POST body.
@@ -249,6 +272,17 @@ export async function chat(
         content: JSON.stringify(result),
       });
     }
+
+    // VULN #53 cont. — Tool call results also logged: wallet balances, ticket IDs,
+    // refund amounts. A get_wallet_balance call for userId=1 logs the admin's balance.
+    // A submit_ticket call logs the approved refund amount and ticket ID.
+    console.log(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level:     "DEBUG",
+      category:  "ARIA_TOOL_RESULTS",
+      userId:    callerUserId ?? null,
+      toolCalls: toolCalls,
+    }));
 
     // Second completion — ARIA formulates final text reply after seeing tool results
     const second = await openai.chat.completions.create({

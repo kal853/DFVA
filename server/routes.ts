@@ -240,10 +240,26 @@ export async function registerRoutes(
 
   // ── BILLING / SUBSCRIPTION ROUTES ───────────────────────────────────────────
 
+  // GET /api/billing/:userId
+  // VULN #54 — PII Logging: Access to any user's billing record emits an audit log that
+  // correlates email address + full name + wallet balance + plan + accessor IP in plaintext.
+  //
+  //   [ACCOUNT_ACCESS] userId=2 email="jdoe@acme.com" fullName="James Doe"
+  //                    walletBalance=$68.00 plan=pro accessorIp=1.2.3.4
+  //
+  // This fires on every Wallet page load, every pricing check, and every IDOR probe
+  // (GET /api/billing/1, /api/billing/2, etc.). Combined with the IDOR on this route
+  // (no auth check), an attacker enumerating userIds generates a full PII ledger in logs.
+  //
+  // GDPR Art. 5(1)(c) — data minimisation: financial + identity fields not needed together.
+  // GDPR Art. 5(1)(f) — integrity/confidentiality: plaintext PII correlation in log files.
   app.get("/api/billing/:userId", async (req, res) => {
     try {
       const user = await storage.getUser(parseInt(req.params.userId));
       if (!user) return res.status(404).json({ message: "User not found" });
+      const accessorIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0] ?? req.socket.remoteAddress ?? "unknown";
+      // PII + financial data written together to stdout on every billing lookup
+      console.log(`[${new Date().toISOString()}] [AUDIT] [ACCOUNT_ACCESS] userId=${user.id} email=${user.email ?? "(none)"} fullName="${user.fullName ?? "(none)"}" walletBalance=$${user.walletBalance} plan=${user.plan} accessorIp=${accessorIp}`);
       res.json({ userId: user.id, username: user.username, plan: user.plan, walletBalance: user.walletBalance, planStartDate: user.planStartDate?.toISOString() ?? null, referralCode: user.referralCode });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });

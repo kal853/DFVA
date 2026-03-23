@@ -324,6 +324,8 @@ Step 3: Execute targeted exploit against reachable route
 | 50 | `GET /api/files` | Path Traversal Bypass | High | `startsWith("logs/")` prefix check — `logs/../../../../etc/passwd` reads any file |
 | 51 | `POST /api/search` | SQL Injection Bypass | High | Escapes `'` → `''` but misses `"` and UNION injection — dumps all user credentials |
 | 52 | Various tool routes | JWT Auth (all sensitive routes) | Info | All CVE/RCE routes now require JWT — but any `alg:none` forged token is accepted |
+| 53 | `POST /api/chat` | PII Logging — Conversation Transcript | High | Full chat history + tool results (wallet balance, ticket amounts) logged verbatim as DEBUG |
+| 54 | `GET /api/billing/:userId` | PII Logging — Financial Correlation | High | Email + fullName + walletBalance + plan + IP logged together on every billing lookup |
 
 ---
 
