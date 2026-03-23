@@ -872,5 +872,126 @@ export async function registerRoutes(
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
+  // ── TEAM WORKSPACES ───────────────────────────────────────────────────────────
+  // VULN #44 (POST /api/workspaces): No plan gate — free users can create workspaces.
+  app.post("/api/workspaces", async (req, res) => {
+    try {
+      const { name, ownerId } = req.body;
+      if (!name || !ownerId) return res.status(400).json({ message: "name and ownerId required" });
+      const ws = await storage.createWorkspace({ name, ownerId: parseInt(ownerId) });
+      res.json(ws);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // VULN #45 (GET /api/workspaces?userId=): IDOR — supply any userId to enumerate their workspaces.
+  app.get("/api/workspaces", async (req, res) => {
+    try {
+      const userId = parseInt(req.query.userId as string ?? "0");
+      if (!userId) return res.status(400).json({ message: "userId required" });
+      const list = await storage.getWorkspacesByUser(userId);
+      res.json(list);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // VULN #46 (GET /api/workspaces/:id): No ownership check — read any workspace by ID (IDOR).
+  app.get("/api/workspaces/:id", async (req, res) => {
+    try {
+      const ws = await storage.getWorkspace(parseInt(req.params.id));
+      if (!ws) return res.status(404).json({ message: "Workspace not found" });
+      res.json(ws);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // VULN #47 (GET /api/workspaces/:id/members): IDOR — list members of any workspace.
+  app.get("/api/workspaces/:id/members", async (req, res) => {
+    try {
+      const members = await storage.getWorkspaceMembers(parseInt(req.params.id));
+      res.json(members);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // VULN #48 (POST /api/workspaces/:id/invite):
+  //   - Token generated with Math.random().toString(36) — same weakness as #13.
+  //   - Intended role written to DB but POST /api/invitations/:token/accept reads ?role= from URL.
+  //   - No check that caller is a workspace admin.
+  app.post("/api/workspaces/:id/invite", async (req, res) => {
+    try {
+      const workspaceId = parseInt(req.params.id);
+      const { email, role = "viewer" } = req.body;
+      if (!email) return res.status(400).json({ message: "email required" });
+      // VULN: Math.random() token — predictable, brute-forceable
+      const token = Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2);
+      const inv = await storage.createInvitation({ workspaceId, email, role, token });
+      // Simulate sending invite email — link embeds role in URL (the tamper target)
+      const inviteUrl = `/invite/${token}?role=${role}`;
+      res.json({ invitation: inv, inviteUrl, note: "Invite link sent (role embedded in URL)" });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/invitations/:token — preview invite details before accepting.
+  // VULN: token is weak — brute-force to discover pending invitations across all workspaces.
+  app.get("/api/invitations/:token", async (req, res) => {
+    try {
+      const inv = await storage.getInvitationByToken(req.params.token);
+      if (!inv) return res.status(404).json({ message: "Invitation not found" });
+      const ws = await storage.getWorkspace(inv.workspaceId);
+      res.json({ ...inv, workspaceName: ws?.name });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // VULN #49 (POST /api/invitations/:token/accept):
+  //   Role taken from ?role= query param — NOT from the invitation record.
+  //   Attacker modifies URL: /invite/TOKEN?role=admin → joins as Workspace Admin.
+  app.post("/api/invitations/:token/accept", async (req, res) => {
+    try {
+      const { userId } = req.body;
+      if (!userId) return res.status(400).json({ message: "userId required" });
+      // VULN: role read from query param, not from invitation DB record
+      const role = (req.query.role as string) ?? "viewer";
+      const inv = await storage.acceptInvitation(req.params.token, parseInt(userId), role);
+      res.json({ message: `Joined workspace as ${role}`, invitation: inv });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // PATCH /api/workspaces/:id/members/:memberId — change member role.
+  // VULN #50: no role check — any workspace member (even Viewer) can promote themselves to Admin.
+  app.patch("/api/workspaces/:id/members/:memberId", async (req, res) => {
+    try {
+      const { role } = req.body;
+      if (!role) return res.status(400).json({ message: "role required" });
+      const member = await storage.updateMemberRole(parseInt(req.params.memberId), role);
+      res.json(member);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // DELETE /api/workspaces/:id/members/:memberId — remove a member.
+  // VULN #51: no role check — any member can remove any other member.
+  app.delete("/api/workspaces/:id/members/:memberId", async (req, res) => {
+    try {
+      await storage.removeWorkspaceMember(parseInt(req.params.memberId));
+      res.json({ message: "Member removed" });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/workspaces/:id/scans — shared scan view for workspace members.
+  // VULN #52: returns ALL scans from ALL member userIds — cross-tenant data bleed.
+  //           No role check: Viewer can see Analyst/Admin scan results.
+  app.get("/api/workspaces/:id/scans", async (req, res) => {
+    try {
+      const members = await storage.getWorkspaceMembers(parseInt(req.params.id));
+      const allScans = await Promise.all(members.map(m => storage.getScanJobsByUser(m.userId)));
+      res.json(allScans.flat());
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/workspaces/:id/invitations — list pending invitations.
+  // VULN: IDOR — any caller can list invitations (and extract tokens) for any workspace.
+  app.get("/api/workspaces/:id/invitations", async (req, res) => {
+    try {
+      const invs = await storage.getWorkspaceInvitations(parseInt(req.params.id));
+      res.json(invs); // VULN: tokens returned in plaintext — enables harvest + replay
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
   return httpServer;
 }
