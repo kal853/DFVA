@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { startScanWorker } from "./scanWorker";
+import { initCredentials, scheduleMonthlyRotation } from "./credentials";
 
 const app = express();
 const httpServer = createServer(app);
@@ -63,6 +64,12 @@ app.use((req, res, next) => {
 (async () => {
   await registerRoutes(httpServer, app);
   startScanWorker();
+
+  // Seed the four platform credentials on first boot, then arm the monthly scheduler.
+  // VULN: initCredentials() logs all four plaintext credential values to stdout.
+  // VULN: scheduleMonthlyRotation() logs old + new values on every rotation.
+  await initCredentials();
+  scheduleMonthlyRotation();
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

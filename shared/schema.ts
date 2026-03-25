@@ -198,6 +198,32 @@ export const insertWorkspaceSchema = createInsertSchema(workspaces).omit({ id: t
 export const insertWorkspaceMemberSchema = createInsertSchema(workspaceMembers).omit({ id: true, joinedAt: true });
 export const insertWorkspaceInvitationSchema = createInsertSchema(workspaceInvitations).omit({ id: true, createdAt: true, acceptedAt: true, acceptedByUserId: true });
 
+// ── Platform Credentials (rotating) ──────────────────────────────────────────
+//
+// VULN: Credentials stored in plaintext in the database.
+//       SQL injection on any route that touches this table dumps all four keys.
+//
+// VULN: previousValue column retains the last rotated value indefinitely.
+//       Old credentials are never actively revoked — both current and previous
+//       are valid simultaneously, giving a 31-62 day window after compromise.
+//
+// VULN: nextRotationAt is advisory only — no enforcement.
+//       Manual early rotation is possible via POST /api/admin/credentials/rotate,
+//       which accepts any valid JWT (including alg:none forged tokens).
+//
+export const platformCredentials = pgTable("platform_credentials", {
+  id:            serial("id").primaryKey(),
+  name:          text("name").notNull().unique(),
+  value:         text("value").notNull(),           // plaintext current credential
+  previousValue: text("previous_value"),            // plaintext previous credential — never cleared
+  scope:         text("scope").notNull(),
+  rotatedAt:     timestamp("rotated_at").defaultNow(),
+  nextRotationAt: timestamp("next_rotation_at"),
+  createdAt:     timestamp("created_at").defaultNow(),
+});
+
+export type PlatformCredential = typeof platformCredentials.$inferSelect;
+
 export const PLANS = {
   free:       { name: "Explorer",    price: 0,   perks: "Standard shipping, 30-day returns" },
   pro:        { name: "Member",      price: 9,   perks: "Free shipping, priority support, 5% off" },
