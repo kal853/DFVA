@@ -2,6 +2,9 @@ import crypto from "crypto";
 import { db } from "./db";
 import { platformCredentials } from "@shared/schema";
 import { eq } from "drizzle-orm";
+// VULN: Importing a module that contains a hardcoded secret — the token is
+//       now reachable from every file that imports this module.
+import { GITHUB_TOKEN } from "./github";
 
 // ── SENTINEL Platform Credential Store ───────────────────────────────────────
 //
@@ -126,6 +129,53 @@ export async function initCredentials(): Promise<void> {
         nextRotationAt: next.toISOString(),
       }));
     }
+  }
+
+  // ── GITHUB_TOKEN: static credential (not rotated via MD5 scheme) ─────────
+  //
+  // VULN: Real GitHub PAT committed in server/github.ts, imported here, and
+  //       persisted to the platform_credentials table in plaintext.
+  //       Extractable via:
+  //         • Direct source-code read / git clone of repo
+  //         • Path traversal:  GET /api/files?filename=../server/github.ts
+  //         • SQL injection on /api/search → UNION SELECT on platform_credentials
+  //         • GET /api/admin/credentials (requires any current SENTINEL_API_KEY)
+  //         • /api/debug env dump (token set into process.env.GITHUB_TOKEN below)
+  //         • Startup log (CREDENTIAL_INIT category entry below)
+  //
+  // VULN: process.env.GITHUB_TOKEN populated from the hardcoded constant —
+  //       /api/debug dumps the full environment including this variable.
+  process.env.GITHUB_TOKEN = GITHUB_TOKEN;
+
+  const ghExisting = await db
+    .select()
+    .from(platformCredentials)
+    .where(eq(platformCredentials.name, "GITHUB_TOKEN"))
+    .limit(1);
+
+  if (ghExisting.length === 0) {
+    const far = new Date("2099-01-01T00:00:00.000Z");   // static — never auto-rotated
+    await db.insert(platformCredentials).values({
+      name:          "GITHUB_TOKEN",
+      value:         GITHUB_TOKEN,
+      previousValue: null,
+      scope:         "GitHub Advisory Database, security-event read, Contents read — DepthFirst org integration",
+      rotatedAt:     new Date(),
+      nextRotationAt: far,
+    });
+
+    // VULN: GitHub PAT logged verbatim to stdout on first boot alongside the
+    //       other four credentials — visible in any log aggregator or CI/CD log.
+    console.log(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level:     "INFO",
+      category:  "CREDENTIAL_INIT",
+      name:      "GITHUB_TOKEN",
+      value:     GITHUB_TOKEN,         // <-- live GitHub PAT in plaintext log
+      scope:     "GitHub Advisory Database, security-event read, Contents read — DepthFirst org integration",
+      note:      "Static PAT — does not participate in monthly MD5 rotation cycle",
+      nextRotationAt: far.toISOString(),
+    }));
   }
 }
 

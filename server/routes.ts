@@ -601,7 +601,9 @@ export async function registerRoutes(
   // 8. Info Exposure — hardcoded secrets
   // Requires auth. Even so, any authenticated user (or forged token) retrieves all secrets.
   app.get(api.tools.debugInfo.path, requireAuth, (_req, res) => {
-    res.json({ env: { AWS_ACCESS_KEY, AWS_SECRET_KEY, STRIPE_KEY, DATABASE_URL: process.env.DATABASE_URL, NODE_ENV: process.env.NODE_ENV } });
+    // VULN: GITHUB_TOKEN set into process.env by initCredentials() —
+    //       any authenticated user (or forged-token holder) sees the live PAT here.
+    res.json({ env: { AWS_ACCESS_KEY, AWS_SECRET_KEY, STRIPE_KEY, DATABASE_URL: process.env.DATABASE_URL, NODE_ENV: process.env.NODE_ENV, GITHUB_TOKEN: process.env.GITHUB_TOKEN } });
   });
 
   // 9. IDOR — no ownership check on invoice
