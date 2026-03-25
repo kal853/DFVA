@@ -8,7 +8,7 @@ export const errorSchemas = {
 export const api = {
   tools: {
     searchUsers: {
-      method: 'GET' as const,
+      method: 'POST' as const,
       path: '/api/search' as const,
       responses: { 200: z.array(z.any()), 500: errorSchemas.internal },
     },
