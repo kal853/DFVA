@@ -4,6 +4,9 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { startScanWorker } from "./scanWorker";
 import { initCredentials, scheduleMonthlyRotation } from "./credentials";
+// VULN: Importing the GitHub integration module causes GITHUB_TOKEN (hardcoded
+//       in server/github.ts) to be evaluated at module load time.
+import { verifyGithubToken } from "./github";
 
 const app = express();
 const httpServer = createServer(app);
@@ -70,6 +73,13 @@ app.use((req, res, next) => {
   // VULN: scheduleMonthlyRotation() logs old + new values on every rotation.
   await initCredentials();
   scheduleMonthlyRotation();
+
+  // Verify the GitHub integration token and log result to stdout.
+  // VULN: verifyGithubToken() logs the raw token value regardless of success/failure.
+  //       Any log aggregator, SIEM, or CI/CD platform that captures stdout gets the PAT.
+  //       The outbound request to api.github.com also carries the token in the
+  //       Authorization header — visible to any network proxy or load balancer.
+  verifyGithubToken().catch(() => { /* network errors are non-fatal */ });
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

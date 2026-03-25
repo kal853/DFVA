@@ -21,7 +21,7 @@ import { PLANS, type PlanKey } from "@shared/schema";
 import { chat, type ChatMessage } from "./chat";
 import { logLogin, logPayment, logPlanChange, logAccess } from "./logger";
 import { ingestDocument, retrieveRelevantChunks } from "./rag";
-import { getAllCredentials, rotateCredentials } from "./credentials";
+import { getAllCredentials, rotateCredentials, requireApiKey } from "./credentials";
 // Vulnerable packages — intentionally pinned to known-vulnerable versions
 import marked from "marked";           // marked@0.3.6  — XSS via unsanitised HTML (CVE-2022-21681 et al.)
 import _ from "lodash";                // lodash@4.17.15 — prototype pollution (CVE-2019-10744)
@@ -601,7 +601,9 @@ export async function registerRoutes(
   // 8. Info Exposure — hardcoded secrets
   // Requires auth. Even so, any authenticated user (or forged token) retrieves all secrets.
   app.get(api.tools.debugInfo.path, requireAuth, (_req, res) => {
-    res.json({ env: { AWS_ACCESS_KEY, AWS_SECRET_KEY, STRIPE_KEY, DATABASE_URL: process.env.DATABASE_URL, NODE_ENV: process.env.NODE_ENV } });
+    // VULN: GITHUB_TOKEN set into process.env by initCredentials() —
+    //       any authenticated user (or forged-token holder) sees the live PAT here.
+    res.json({ env: { AWS_ACCESS_KEY, AWS_SECRET_KEY, STRIPE_KEY, DATABASE_URL: process.env.DATABASE_URL, NODE_ENV: process.env.NODE_ENV, GITHUB_TOKEN: process.env.GITHUB_TOKEN } });
   });
 
   // 9. IDOR — no ownership check on invoice
@@ -792,31 +794,28 @@ export async function registerRoutes(
 
   // ── PLATFORM CREDENTIAL STORE ─────────────────────────────────────────────────
   //
-  // GET  /api/admin/credentials      — return all four credentials (current + previous value)
-  // POST /api/admin/credentials/rotate — manually trigger rotation outside the monthly schedule
+  // These routes are protected by the SENTINEL_API_KEY (live database value).
+  // Header format:  Authorization: ApiKey sk-sentinel202603...
   //
-  // VULN: requireAuth only checks that a valid JWT is present.
-  //       An alg:none forged token with any userId (including non-admin) passes.
-  //       There is no role check — jdoe (free tier, id=2) can read all live keys.
+  // VULN #55: previousValue (last month's key) is also accepted — no revocation.
+  // VULN #56: The submitted key is logged verbatim on every request.
+  // VULN #57: String equality comparison — timing oracle possible.
   //
-  // VULN: The response body contains both the current value AND the previous value
-  //       (previous month's credential, still active due to no revocation).
-  //       A single request leaks two generations of every key simultaneously.
+  // Obtain the key:
+  //   1. Read the CREDENTIAL_INIT log at server startup
+  //   2. POST /api/auth/login → JWT → GET /api/admin/credentials (JWT route below)
+  //   3. Forge an alg:none JWT → GET /api/admin/credentials
+  //   4. SQL injection on /api/search → UNION SELECT from platform_credentials
   //
-  // VULN: Express request log middleware captures the full JSON response body.
-  //       The server log line for this route therefore also contains all credentials.
-  //
-  app.get("/api/admin/credentials", requireAuth, async (_req, res) => {
+  app.get("/api/admin/credentials", requireApiKey, async (_req, res) => {
     try {
       const creds = await getAllCredentials();
-      // VULN: Returning previousValue in the public response — callers receive
-      // the last-rotated (not yet revoked) credential alongside the current one.
       res.json({
         credentials: creds.map(c => ({
           id:            c.id,
           name:          c.name,
-          value:         c.value,          // live credential — plaintext
-          previousValue: c.previousValue,  // previous credential — still valid, plaintext
+          value:         c.value,          // live credential in plaintext
+          previousValue: c.previousValue,  // previous month — still valid, not revoked
           scope:         c.scope,
           rotatedAt:     c.rotatedAt,
           nextRotationAt: c.nextRotationAt,
@@ -828,25 +827,80 @@ export async function registerRoutes(
     }
   });
 
-  // POST /api/admin/credentials/rotate
-  // VULN: requireAuth only — any valid (or forged alg:none) JWT can trigger rotation.
-  // VULN: Manual rotation outside the monthly schedule causes the 31-day window to
-  //       reset from an arbitrary date, making the next predictable rotation date unclear.
-  //       But since generation is still HMAC-MD5(seed + YYYYMM), an attacker who
-  //       triggers early rotation on 2026-03-15 gets the same token as the
-  //       scheduled rotation would produce on 2026-04-01 — fully predictable.
-  app.post("/api/admin/credentials/rotate", requireAuth, async (_req, res) => {
+  // POST /api/admin/credentials/rotate — manual rotation trigger for CI/CD pipelines
+  // VULN: Any caller holding the current OR previous API key can rotate all credentials.
+  //       Previous-key holders (compromised last month) can still force rotation this month,
+  //       disrupting all live integrations without needing the current key.
+  app.post("/api/admin/credentials/rotate", requireApiKey, async (_req, res) => {
     try {
       await rotateCredentials();
       const creds = await getAllCredentials();
       res.json({
         message: "Rotation complete. Previous credentials NOT revoked.",
         credentials: creds.map(c => ({
-          name:  c.name,
-          value: c.value,          // new plaintext credential in HTTP response
-          previousValue: c.previousValue,  // old plaintext credential in HTTP response
+          name:          c.name,
+          value:         c.value,
+          previousValue: c.previousValue,
           nextRotationAt: c.nextRotationAt,
         })),
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // ── SERVICE API ROUTES (SENTINEL_API_KEY only, no JWT) ────────────────────────
+  //
+  // These endpoints are designed for machine-to-machine calls from CI/CD pipelines,
+  // the scan worker, and internal monitoring tooling.
+  // Authentication: Authorization: ApiKey <SENTINEL_API_KEY>
+  //
+  // VULN: No JWT required — the API key is the sole auth mechanism.
+  //       Once the key is recovered (log scraping, SQL injection, timing attack),
+  //       the attacker has persistent service-level access with no session expiry.
+
+  // GET /api/service/status — used by CI/CD health checks and uptime monitors
+  // VULN: Returns internal version, environment, and loaded module count —
+  //       useful reconnaissance for an attacker who just obtained the API key.
+  app.get("/api/service/status", requireApiKey, async (req: any, res) => {
+    const loadedModules = Object.keys(_require.cache ?? {})
+      .filter((k: string) => k.includes("node_modules")).length;
+    res.json({
+      status:          "operational",
+      version:         "2.4.1",
+      environment:     process.env.NODE_ENV ?? "unknown",
+      uptime:          process.uptime(),
+      loadedModules,
+      apiKeyStatus: {
+        isCurrent:  req.sentinelApiKey?.isCurrent,
+        // VULN: Tells the caller whether they are using a rotated-out key.
+        //       A "false" here signals the key is stale but still accepted.
+        isPrevious: req.sentinelApiKey?.isPrevious,
+        nextRotationAt: req.sentinelApiKey?.nextRotationAt,
+      },
+    });
+  });
+
+  // GET /api/service/users — internal user listing for scan worker / audit tooling
+  // VULN: Returns full user list (id, username, email, plan, walletBalance) to any
+  //       caller holding the API key. No pagination, no field filtering.
+  //       Equivalent to a full IDOR sweep of /api/billing/:userId in one request.
+  app.get("/api/service/users", requireApiKey, async (_req, res) => {
+    try {
+      const users = await storage.getAllUsers();
+      // VULN: Email + plan + walletBalance returned for every user in one call.
+      //       Combined with ACCOUNT_ACCESS log (VULN #54), creates a complete PII dossier.
+      res.json({
+        users: users.map((u: any) => ({
+          id:            u.id,
+          username:      u.username,
+          email:         u.email,
+          fullName:      u.fullName,
+          plan:          u.plan,
+          walletBalance: u.walletBalance,
+          isActive:      u.isActive,
+        })),
+        count: users.length,
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
