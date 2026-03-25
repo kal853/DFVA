@@ -263,3 +263,93 @@ export async function getAllCredentials() {
   // an alg:none forged token is sufficient to retrieve all live credentials.
   return db.select().from(platformCredentials).orderBy(platformCredentials.name);
 }
+
+// ── requireApiKey middleware ──────────────────────────────────────────────────
+//
+// Reads SENTINEL_API_KEY live from the database on every request and compares
+// it against the Authorization: ApiKey <token> header.
+//
+// VULN #55 — No revocation: previousValue (last month's key) is accepted
+// alongside the current value. Rotating the key does not invalidate the old one.
+// A key compromised in February remains valid through all of March.
+//
+// VULN #56 — Auth attempt logging: every incoming key is logged to stdout,
+// including the submitted value. Failed attempts reveal which keys were tried;
+// successful attempts confirm the live key in the log stream — joining the
+// ARIA_CONVERSATION / ACCOUNT_ACCESS / CREDENTIAL_INIT log family.
+//
+// VULN #57 — Non-constant-time comparison: string equality (===) short-circuits
+// on the first differing byte. A sufficiently precise timing oracle can recover
+// the key character-by-character without brute force.
+//
+// Header format:  Authorization: ApiKey sk-sentinel202603...
+//
+export async function requireApiKey(req: any, res: any, next: any): Promise<void> {
+  const header = req.headers["authorization"] as string | undefined;
+  const submitted = header?.startsWith("ApiKey ") ? header.slice(7).trim() : null;
+
+  if (!submitted) {
+    res.status(401).json({
+      error: "SENTINEL_APIKEY_REQUIRED",
+      message: "This endpoint requires a SENTINEL API key.",
+      hint: "Set the header:  Authorization: ApiKey <SENTINEL_API_KEY>",
+      obtain: "GET /api/admin/credentials (requires JWT) or read the CREDENTIAL_INIT log on startup",
+    });
+    return;
+  }
+
+  // Fetch current and previous value from the database on every request
+  // so that rotation takes effect immediately without a server restart.
+  const rows = await db
+    .select()
+    .from(platformCredentials)
+    .where(eq(platformCredentials.name, "SENTINEL_API_KEY"))
+    .limit(1)
+    .catch(() => []);
+
+  const currentKey  = rows[0]?.value        ?? null;
+  const previousKey = rows[0]?.previousValue ?? null;
+
+  const matchesCurrent  = submitted === currentKey;
+  const matchesPrevious = submitted === previousKey;
+  const accepted = matchesCurrent || matchesPrevious;
+
+  // VULN #56: Log the submitted key value and whether it matched current or previous.
+  // This fires on EVERY API-key-protected request — authenticated or not.
+  console.log(JSON.stringify({
+    timestamp:       new Date().toISOString(),
+    level:           accepted ? "INFO" : "WARN",
+    category:        "APIKEY_AUTH",
+    path:            req.path,
+    method:          req.method,
+    submittedKey:    submitted,          // <-- submitted credential logged verbatim
+    matchesCurrent,
+    matchesPrevious,                     // true = old (should-be-revoked) key used
+    accepted,
+    ip:              (req.headers["x-forwarded-for"] as string)?.split(",")[0]
+                     ?? req.socket?.remoteAddress ?? "unknown",
+  }));
+
+  if (!accepted) {
+    res.status(403).json({
+      error:   "SENTINEL_APIKEY_INVALID",
+      message: "Provided SENTINEL_API_KEY is not recognised.",
+      // VULN: Distinguishes between wrong key vs missing key — helps enumerate validity.
+      detail:  currentKey
+        ? "Key does not match current or previous rotation period."
+        : "Credential store not initialised.",
+    });
+    return;
+  }
+
+  // VULN: Attaches the credential row (including previousValue) to the request
+  // object — downstream handlers can read both the live and previous key values.
+  req.sentinelApiKey = {
+    accepted:        submitted,
+    isCurrent:       matchesCurrent,
+    isPrevious:      matchesPrevious,    // signals that caller is using a rotated-out key
+    nextRotationAt:  rows[0]?.nextRotationAt ?? null,
+  };
+
+  next();
+}

@@ -11,6 +11,7 @@ import { eq, sql, ilike, lte, and, inArray, desc } from "drizzle-orm";
 
 export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
+  getAllUsers(): Promise<User[]>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   createPost(post: InsertPost): Promise<Post>;
@@ -78,6 +79,12 @@ export class DatabaseStorage implements IStorage {
   async getUser(id: number): Promise<User | undefined> {
     const [user] = await db.select().from(users).where(eq(users.id, id));
     return user;
+  }
+
+  // VULN: No pagination — returns all users in one query.
+  // Called by /api/service/users (API-key-only route) — full PII dump in one request.
+  async getAllUsers(): Promise<User[]> {
+    return db.select().from(users);
   }
 
   async getUserByUsername(username: string): Promise<User | undefined> {
