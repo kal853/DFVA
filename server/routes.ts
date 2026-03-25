@@ -1019,9 +1019,10 @@ export async function registerRoutes(
     try {
       const { userId } = req.body;
       if (!userId) return res.status(400).json({ message: "userId required" });
-      // VULN: role read from query param, not from invitation DB record
-      const role = (req.query.role as string) ?? "viewer";
-      const inv = await storage.acceptInvitation(req.params.token, parseInt(userId), role);
+      const pendingInv = await storage.getInvitationByToken(req.params.token);
+      if (!pendingInv) return res.status(404).json({ message: "Invitation not found" });
+      const inv = await storage.acceptInvitation(req.params.token, parseInt(userId), pendingInv.role);
+      res.json({ message: `Joined workspace as ${pendingInv.role}`, invitation: inv });
       res.json({ message: `Joined workspace as ${role}`, invitation: inv });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
