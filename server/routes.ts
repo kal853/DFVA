@@ -976,7 +976,15 @@ export async function registerRoutes(
   });
 
   // VULN #47 (GET /api/workspaces/:id/members): IDOR — list members of any workspace.
-  app.get("/api/workspaces/:id/members", async (req, res) => {
+  app.get("/api/workspaces/:id/members", requireAuth, async (req, res) => {
+    try {
+      const workspaceId = parseInt(req.params.id);
+      const members = await storage.getWorkspaceMembers(workspaceId);
+      const callerIsMember = members.some((m: any) => m.userId === req.sentinelUser.userId);
+      if (!callerIsMember) return res.status(403).json({ message: "Forbidden" });
+      res.json(members);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
     try {
       const members = await storage.getWorkspaceMembers(parseInt(req.params.id));
       res.json(members);
