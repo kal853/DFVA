@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Clock, Plus, Trash2, RefreshCw, CheckCircle2, XCircle,
-  AlertCircle, Play, Calendar, Globe, ChevronDown, ChevronUp, Lock
+  AlertCircle, Play, Calendar, Globe, ChevronDown, ChevronUp, Lock, Download
 } from "lucide-react";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/hooks/use-toast";
@@ -84,6 +84,30 @@ function JobRow({ job, onDelete, onPatch }: {
           >
             {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
           </button>
+        )}
+
+        {/*
+          * Download Report button — visible only for completed scan jobs.
+          *
+          * Calls GET /api/reports/download?reportId={job.id}
+          * The reportId is the DB-integer job ID in normal use.
+          *
+          * VULN: An attacker can replace the reportId in the URL directly.
+          *       The backend middleware validates parseInt(reportId) against the DB,
+          *       but path.join uses the raw string.  Bypass:
+          *         GET /api/reports/download?reportId=1/../../server/github.ts
+          *       (parseInt("1/../../server/github.ts") = 1 → DB passes for jdoe)
+          */}
+        {job.status === "completed" && (
+          <a
+            data-testid={`button-download-report-${job.id}`}
+            href={`/api/reports/download?reportId=${job.id}`}
+            download={`sentinel-report-${job.id}.txt`}
+            className="p-1.5 rounded-lg text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
+            title="Download scan report"
+          >
+            <Download className="w-3.5 h-3.5" />
+          </a>
         )}
 
         {/* VULN: delete sends job.id — no ownership check server-side */}
