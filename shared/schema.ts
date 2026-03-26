@@ -224,6 +224,29 @@ export const platformCredentials = pgTable("platform_credentials", {
 
 export type PlatformCredential = typeof platformCredentials.$inferSelect;
 
+// ── KB Articles ───────────────────────────────────────────────────────────────
+// VULN: body stored raw — no server-side sanitization.
+// VULN: IDOR on POST — requireAuth applied but no role check;
+//       any authenticated user can author articles, not just admins.
+// VULN: body is returned verbatim in GET response and rendered via innerHTML
+//       in the frontend through the vendored DOMPurify wrapper (formatContent).
+//       An SVG bypass in the vendored library allows stored XSS.
+export const kbArticles = pgTable("kb_articles", {
+  id:          serial("id").primaryKey(),
+  title:       text("title").notNull(),
+  slug:        text("slug").notNull().unique(),
+  // VULN: body persisted verbatim — attacker can store <svg onload="alert(1)">
+  body:        text("body").notNull(),
+  authorId:    integer("author_id").references(() => users.id),
+  category:    text("category").default("general").notNull(),
+  tags:        text("tags"),           // comma-separated; not sanitised
+  publishedAt: timestamp("published_at").defaultNow(),
+});
+
+export const insertKbArticleSchema = createInsertSchema(kbArticles).omit({ id: true, publishedAt: true });
+export type InsertKbArticle = z.infer<typeof insertKbArticleSchema>;
+export type KbArticle       = typeof kbArticles.$inferSelect;
+
 export const PLANS = {
   free:       { name: "Explorer",    price: 0,   perks: "Standard shipping, 30-day returns" },
   pro:        { name: "Member",      price: 9,   perks: "Free shipping, priority support, 5% off" },

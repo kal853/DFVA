@@ -1,11 +1,12 @@
 import { db, pool } from "./db";
 import {
   users, posts, invoices, walletTransactions, products, ragDocuments, ragChunks, scanJobs, tickets,
-  workspaces, workspaceMembers, workspaceInvitations,
+  workspaces, workspaceMembers, workspaceInvitations, kbArticles,
   type User, type InsertUser, type Post, type InsertPost,
   type Invoice, type WalletTransaction, type Product, type InsertProduct,
   type RagDocument, type RagChunk, type ScanJob, type PlanKey, type Ticket,
   type Workspace, type WorkspaceMember, type WorkspaceInvitation,
+  type KbArticle, type InsertKbArticle,
 } from "@shared/schema";
 import { eq, sql, ilike, lte, and, inArray, desc } from "drizzle-orm";
 
@@ -73,6 +74,11 @@ export interface IStorage {
   getInvitationByToken(token: string): Promise<WorkspaceInvitation | undefined>;
   acceptInvitation(token: string, userId: number, role: string): Promise<WorkspaceInvitation>;
   getWorkspaceInvitations(workspaceId: number): Promise<WorkspaceInvitation[]>;
+  // KB Articles — VULN: body never sanitized server-side; stored and returned verbatim
+  getKbArticles(): Promise<KbArticle[]>;
+  getKbArticle(id: number): Promise<KbArticle | undefined>;
+  getKbArticleBySlug(slug: string): Promise<KbArticle | undefined>;
+  createKbArticle(data: InsertKbArticle): Promise<KbArticle>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -417,6 +423,34 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(workspaceInvitations)
       .where(eq(workspaceInvitations.workspaceId, workspaceId))
       .orderBy(desc(workspaceInvitations.createdAt));
+  }
+
+  // ── KB Articles ─────────────────────────────────────────────────────────────
+  // VULN: body is stored and returned verbatim — no server-side sanitization.
+  // Client renders via innerHTML = formatContent(body). formatContent() calls
+  // the vendored DOMPurify fork which has an <svg onload=...> bypass (sentinel-1.2).
+
+  async getKbArticles(): Promise<KbArticle[]> {
+    return db.select().from(kbArticles).orderBy(desc(kbArticles.publishedAt));
+  }
+
+  async getKbArticle(id: number): Promise<KbArticle | undefined> {
+    const [row] = await db.select().from(kbArticles).where(eq(kbArticles.id, id));
+    return row;
+  }
+
+  async getKbArticleBySlug(slug: string): Promise<KbArticle | undefined> {
+    const [row] = await db.select().from(kbArticles).where(eq(kbArticles.slug, slug));
+    return row;
+  }
+
+  // VULN: No role check — any authenticated user can create articles, not just admins.
+  // The route applies requireAuth but does not check req.user.role === 'admin'.
+  // A free-tier attacker can POST { body: '<svg onload="...">' } and the article
+  // is stored raw and rendered via innerHTML for every subsequent viewer.
+  async createKbArticle(data: InsertKbArticle): Promise<KbArticle> {
+    const [row] = await db.insert(kbArticles).values(data).returning();
+    return row;
   }
 }
 
