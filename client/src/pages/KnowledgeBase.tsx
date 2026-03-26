@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Shield, Upload, Trash2, FileText, FileCode, File, RefreshCw,
-  AlertCircle, Lock, BookOpen, Tag, ChevronLeft, Plus, X,
+  AlertCircle, Lock, BookOpen, Tag, ChevronLeft, Plus, X, Download,
 } from "lucide-react";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/hooks/use-toast";
@@ -51,6 +51,20 @@ function StatusBadge({ status }: { status: string }) {
 // ── ArticleViewer ─────────────────────────────────────────────────────────────
 
 function ArticleViewer({ article, onBack }: { article: KbArticle; onBack: () => void }) {
+  /*
+   * VULN (IDOR — client side): The export href is built from article.id, which is
+   * the DB integer returned by the server for the CURRENTLY selected article.
+   * In normal use this is the caller's own content — but the route has no ownership
+   * check, so any id value (obtained by inspection or enumeration) works equally.
+   *
+   * Attacker flow:
+   *   1. Authenticate as jdoe (free-tier)
+   *   2. Note that article IDs are sequential integers (visible in list)
+   *   3. Directly navigate to /api/kb/articles/2/export — returns exports/2.pdf
+   *      which is classified RESTRICTED — ADMIN ONLY (contains internal SENT-0021
+   *      details: JWT algorithm confusion exploit recipe)
+   *   4. No server-side check prevents jdoe from downloading article 2's export.
+   */
   const contentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -94,13 +108,34 @@ function ArticleViewer({ article, onBack }: { article: KbArticle; onBack: () => 
 
   return (
     <div data-testid="panel-article-viewer">
-      <button
-        data-testid="button-back-articles"
-        onClick={onBack}
-        className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors mb-6"
-      >
-        <ChevronLeft className="w-4 h-4" /> Back to articles
-      </button>
+      <div className="flex items-center justify-between mb-6">
+        <button
+          data-testid="button-back-articles"
+          onClick={onBack}
+          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ChevronLeft className="w-4 h-4" /> Back to articles
+        </button>
+
+        {/*
+          * VULN (IDOR): href is built from article.id — the integer from the DB.
+          * The route has NO ownership or visibility check, so any authenticated
+          * user can replace the id in the URL to download any article's export.
+          *
+          * Normal use:  /api/kb/articles/1/export  → exports/1.pdf (public)
+          * IDOR attack: /api/kb/articles/2/export  → exports/2.pdf (RESTRICTED)
+          *              Even though jdoe is free-tier and not the article's author.
+          */}
+        <a
+          data-testid={`button-export-article-${article.id}`}
+          href={`/api/kb/articles/${article.id}/export`}
+          download={`sentinel-article-${article.id}.pdf`}
+          className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground hover:text-primary border border-border/40 hover:border-primary/30 bg-muted/20 hover:bg-primary/5 rounded-lg px-3 py-1.5 transition-all"
+          title="Export as PDF"
+        >
+          <Download className="w-3.5 h-3.5" /> Export PDF
+        </a>
+      </div>
 
       <div className="mb-6">
         <div className="flex items-center gap-2 mb-1">

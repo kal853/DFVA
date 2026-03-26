@@ -1,0 +1,47 @@
+%PDF-1.4 SENTINEL EXPORT
+%
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+
+=============================================================
+  SENTINEL SECURITY PLATFORM — ARTICLE EXPORT
+=============================================================
+Article ID   : 2
+Title        : JWT Algorithm Confusion — SENTINEL Internal Notes
+Category     : auth
+Exported by  : sentinel-export-service v1.4.0
+Export time  : 2026-03-10T14:23:00Z
+Classification: RESTRICTED — ADMIN ONLY
+Author ID    : 1 (admin)
+
+─────────────────────────────────────────────────────────────
+⚠  RESTRICTED CONTENT — FOR ADMINISTRATOR REVIEW ONLY  ⚠
+─────────────────────────────────────────────────────────────
+This document contains details about known vulnerabilities
+in SENTINEL's own JWT implementation. It is intended solely
+for the security team and should not be accessible to
+standard or pro tier users.
+
+─────────────────────────────────────────────────────────────
+PLATFORM VULNERABILITY DETAILS (INTERNAL)
+─────────────────────────────────────────────────────────────
+SENTINEL's verifyToken() function in server/auth.ts accepts
+any algorithm value in the JWT header.  When alg is NOT
+"HS256", the signature check is bypassed entirely.
+
+Forge any role without the secret:
+  HEADER  = base64url({"alg":"none","typ":"JWT"})
+  PAYLOAD = base64url({"userId":1,"username":"admin",
+                        "role":"admin","plan":"enterprise"})
+  TOKEN   = HEADER.PAYLOAD.
+
+The empty third segment is accepted as a valid token.
+This grants full admin access to all protected endpoints.
+
+Internal ticket: SENT-0021
+Status: OPEN — remediation pending Q2 2026 sprint
+Priority: CRITICAL
+─────────────────────────────────────────────────────────────
+SENTINEL PLATFORM — RESTRICTED — DO NOT DISTRIBUTE
+=============================================================
