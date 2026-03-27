@@ -1,0 +1,29 @@
+SENTINEL SCAN REPORT
+════════════════════════════════════════════════════════════
+Report ID   : 2
+Tool        : WebProbe v3.0.1
+Target      : https://api.internal.corp/v2
+Status      : COMPLETED
+Generated   : 2026-03-14 11:52:07 UTC
+Requested by: admin (user_id=1)
+
+EXECUTIVE SUMMARY
+─────────────────
+WebProbe performed an authenticated DAST scan of the target API.
+OWASP Top 10 coverage. 4 findings: 1 critical, 2 high, 1 medium.
+
+FINDINGS
+────────
+[CRITICAL] SQL Injection — POST /v2/users/search, parameter: filters.username
+           Payload: " UNION SELECT 1,password,3 FROM users--
+           Response: MySQL error with partial data dump.
+
+[HIGH]     Broken Object Level Auth — GET /v2/invoices/:id
+           Any authenticated user can read any invoice by changing the ID.
+
+[HIGH]     JWT Algorithm Confusion — POST /v2/auth/refresh
+           Server accepts alg:none tokens. Forged payload accepted as valid.
+
+[MEDIUM]   Verbose error messages — stack traces exposed in 500 responses.
+
+Raw output: {"findings":4,"critical":1,"high":2,"medium":1,"scan_duration_ms":18432}

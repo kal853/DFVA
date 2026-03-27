@@ -1,0 +1,33 @@
+SENTINEL SCAN REPORT
+════════════════════════════════════════════════════════════
+Report ID   : 1
+Tool        : NullScan v2.1.4
+Target      : https://demo-target.internal
+Status      : COMPLETED
+Generated   : 2026-03-12 08:14:33 UTC
+Requested by: jdoe (user_id=2)
+
+EXECUTIVE SUMMARY
+─────────────────
+NullScan completed a full TCP/UDP port scan of the target.
+12 open ports identified. 3 services running outdated software.
+1 critical finding: SSH on port 22 accepts password authentication.
+
+OPEN PORTS
+──────────
+22/tcp   ssh      OpenSSH 7.9p1 Debian 10+deb10u4  [OUTDATED]
+80/tcp   http     nginx/1.14.0                      [OUTDATED]
+443/tcp  https    nginx/1.14.0 (TLS 1.0 enabled)   [CRITICAL]
+3306/tcp mysql    MySQL 5.7.38                      [OUTDATED]
+6379/tcp redis    Redis 5.0.14 (no auth)            [CRITICAL]
+8080/tcp http-alt Apache Tomcat 9.0.31              [OUTDATED]
+...
+
+FINDINGS
+────────
+[CRITICAL] Redis 6379 — no authentication configured. Any host can connect.
+[CRITICAL] TLS 1.0 enabled on port 443 — POODLE/BEAST attack surface.
+[HIGH]     SSH password auth enabled — brute-force risk.
+[MEDIUM]   MySQL 3306 externally reachable — should be firewalled.
+
+Raw output: {"open_ports":[22,80,443,3306,6379,8080],"scan_duration_ms":4821}

