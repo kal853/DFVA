@@ -347,6 +347,95 @@ export async function registerRoutes(
     res.json({ message: "Logged out." });
   });
 
+  // ── POST-LOGIN REDIRECT ──────────────────────────────────────────────────────
+  //
+  // GET /api/auth/redirect?next=<url>
+  //
+  // Used by the login page to send users to their intended destination after
+  // successful authentication.  The `next` parameter is set by the login page
+  // from the incoming URL's own query string, so that deep links work:
+  //
+  //   /login?next=/scans              → after login → /scans
+  //   /login?next=/tools              → after login → /tools
+  //
+  // ── What the scanner flags ───────────────────────────────────────────────────
+  // CWE-601 — URL Redirection to Untrusted Site ("Open Redirect")
+  //
+  // The scanner traces req.query.next (user-controlled) to res.redirect():
+  //
+  //   const next = req.query.next ?? "/";
+  //   res.redirect(next);                   // ← taint sink, no validation
+  //
+  // Express's res.redirect() accepts any string, including absolute URLs.
+  // The scanner finds no allowlist check, no relative-URL constraint, and no
+  // host validation between the source and the sink.  Finding: HIGH.
+  //
+  // ── Why the scanner is right ─────────────────────────────────────────────────
+  // Attack scenario (phishing via trusted domain):
+  //
+  //   Attacker crafts a login link and sends it to a target user:
+  //
+  //     https://sentinel.example.com/login?next=https://attacker.io/harvest
+  //
+  //   The user sees the SENTINEL domain in the URL, considers it trustworthy,
+  //   and logs in.  Immediately after authentication the browser is redirected
+  //   to attacker.io — which shows a fake "session expired, re-enter credentials"
+  //   page.  The target re-enters their password.
+  //
+  //   curl -v http://localhost:5000/api/auth/redirect?next=https://attacker.io
+  //   < HTTP/1.1 302 Found
+  //   < Location: https://attacker.io
+  //
+  // ── Easy one-line fix ────────────────────────────────────────────────────────
+  // Add a single guard before res.redirect():
+  //
+  //   if (!next.startsWith("/") || next.startsWith("//")) {
+  //     return res.status(400).json({ message: "Invalid redirect target." });
+  //   }
+  //
+  // This constrains `next` to same-origin relative paths, preventing all
+  // absolute URLs and protocol-relative URLs (//evil.com).
+  // The fix is one conditional and one return — exactly what the scanner asks for.
+  //
+  // ── Why the fix was never applied ────────────────────────────────────────────
+  // The feature was added by a junior dev who tested only with relative paths
+  // (/dashboard, /scans).  Absolute-URL redirects were never in the test cases.
+  // The route was marked "low complexity, no auth required" and skipped in review.
+
+  app.get("/api/auth/redirect", (req, res) => {
+    // VULN (source): req.query.next — user-controlled URL parameter.
+    //   Express does not parse or validate query string values.
+    //   `next` can be any string the caller supplies, including "https://evil.com".
+    const next = (req.query.next as string | undefined) ?? "/";
+
+    // Log the redirect target — useful for observing the attack in server logs.
+    // VULN: raw `next` value is logged before validation, so phishing URLs appear
+    //       in the access log alongside the caller's IP address.
+    console.log(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level:     "INFO",
+      category:  "AUTH_REDIRECT",
+      // VULN: raw next logged — absolute attacker URL visible in log stream
+      next,
+      note: "No validation performed before redirect",
+    }));
+
+    // ── MISSING VALIDATION ────────────────────────────────────────────────────
+    //
+    // VULN: res.redirect() is called with the raw, user-controlled `next` value.
+    //
+    // The one-line fix that should appear here but doesn't:
+    //
+    //   if (!next.startsWith("/") || next.startsWith("//")) {
+    //     return res.status(400).json({ message: "Invalid redirect target." });
+    //   }
+    //
+    // Without it, any absolute URL is accepted as a redirect destination.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    res.redirect(next);
+  });
+
   // ── REGISTRATION with REFERRAL CREDIT ─────────────────────────────────────────
   // VULN #44 (C1): Referral credit fires on account CREATION, not on payment settlement.
   //   → Attacker registers infinite sock accounts with referral code to generate credits.
