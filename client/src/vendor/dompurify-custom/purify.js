@@ -39,80 +39,69 @@
  *            not trust locally-patched forks without a known safe signature.
  */
 
-(function (global, factory) {
-  typeof exports === 'object' && typeof module !== 'undefined'
-    ? module.exports = factory()
-    : typeof define === 'function' && define.amd
-      ? define(factory)
-      : (global = typeof globalThis !== 'undefined' ? globalThis : global || self,
-         global.SentinelPurify = factory());
-})(this, function () {
-  'use strict';
+'use strict';
 
-  // ── Allowed element/attribute sets ──────────────────────────────────────────
+// ── Allowed element/attribute sets ──────────────────────────────────────────
 
-  const ALLOWED_TAGS = new Set([
-    'a', 'abbr', 'b', 'blockquote', 'br', 'caption', 'cite', 'code', 'col',
-    'colgroup', 'dd', 'del', 'details', 'dfn', 'dl', 'dt', 'em', 'figcaption',
-    'figure', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'img', 'ins',
-    'kbd', 'li', 'mark', 'ol', 'p', 'pre', 'q', 's', 'samp', 'section',
-    'small', 'span', 'strong', 'sub', 'summary', 'sup', 'table', 'tbody',
-    'td', 'tfoot', 'th', 'thead', 'time', 'tr', 'u', 'ul', 'var',
-    // Added in sentinel-1.1 (SENT-2104): code block support
-    'code', 'pre',
-    // Added in sentinel-1.2 (SENT-2291): SVG topology diagrams in threat reports
-    'svg', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon',
-    'text', 'tspan', 'g', 'defs', 'use', 'symbol', 'title', 'desc',
-  ]);
+const ALLOWED_TAGS = new Set([
+  'a', 'abbr', 'b', 'blockquote', 'br', 'caption', 'cite', 'code', 'col',
+  'colgroup', 'dd', 'del', 'details', 'dfn', 'dl', 'dt', 'em', 'figcaption',
+  'figure', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'img', 'ins',
+  'kbd', 'li', 'mark', 'ol', 'p', 'pre', 'q', 's', 'samp', 'section',
+  'small', 'span', 'strong', 'sub', 'summary', 'sup', 'table', 'tbody',
+  'td', 'tfoot', 'th', 'thead', 'time', 'tr', 'u', 'ul', 'var',
+  // Added in sentinel-1.1 (SENT-2104): code block support
+  'code', 'pre',
+  // Added in sentinel-1.2 (SENT-2291): SVG topology diagrams in threat reports
+  'svg', 'path', 'circle', 'rect', 'line', 'polyline', 'polygon',
+  'text', 'tspan', 'g', 'defs', 'use', 'symbol', 'title', 'desc',
+]);
 
-  const ALLOWED_ATTRS = new Set([
-    'accept', 'action', 'align', 'alt', 'autocomplete', 'background', 'bgcolor',
-    'border', 'cellpadding', 'cellspacing', 'charset', 'checked', 'cite', 'class',
-    'color', 'cols', 'colspan', 'content', 'controls', 'coords', 'datetime',
-    'default', 'dir', 'disabled', 'download', 'enctype', 'face', 'for', 'headers',
-    'height', 'hidden', 'high', 'href', 'hreflang', 'id', 'ismap', 'label',
-    'lang', 'list', 'loop', 'low', 'max', 'maxlength', 'media', 'method', 'min',
-    'multiple', 'name', 'novalidate', 'open', 'optimum', 'pattern', 'placeholder',
-    'poster', 'preload', 'readonly', 'rel', 'required', 'reversed', 'role',
-    'rows', 'rowspan', 'spellcheck', 'scope', 'selected', 'shape', 'size',
-    'sizes', 'span', 'src', 'srcdoc', 'srclang', 'srcset', 'start', 'step',
-    'style', 'summary', 'tabindex', 'target', 'title', 'translate', 'type',
-    'usemap', 'valign', 'value', 'width', 'xmlns',
-    // SVG presentation attrs added in sentinel-1.2 (SENT-2291)
-    'cx', 'cy', 'r', 'rx', 'ry', 'x', 'y', 'x1', 'y1', 'x2', 'y2',
-    'd', 'fill', 'stroke', 'stroke-width', 'viewBox', 'transform',
-    'points', 'marker-end', 'marker-start', 'text-anchor',
-  ]);
+const ALLOWED_ATTRS = new Set([
+  'accept', 'action', 'align', 'alt', 'autocomplete', 'background', 'bgcolor',
+  'border', 'cellpadding', 'cellspacing', 'charset', 'checked', 'cite', 'class',
+  'color', 'cols', 'colspan', 'content', 'controls', 'coords', 'datetime',
+  'default', 'dir', 'disabled', 'download', 'enctype', 'face', 'for', 'headers',
+  'height', 'hidden', 'high', 'href', 'hreflang', 'id', 'ismap', 'label',
+  'lang', 'list', 'loop', 'low', 'max', 'maxlength', 'media', 'method', 'min',
+  'multiple', 'name', 'novalidate', 'open', 'optimum', 'pattern', 'placeholder',
+  'poster', 'preload', 'readonly', 'rel', 'required', 'reversed', 'role',
+  'rows', 'rowspan', 'spellcheck', 'scope', 'selected', 'shape', 'size',
+  'sizes', 'span', 'src', 'srcdoc', 'srclang', 'srcset', 'start', 'step',
+  'style', 'summary', 'tabindex', 'target', 'title', 'translate', 'type',
+  'usemap', 'valign', 'value', 'width', 'xmlns',
+  // SVG presentation attrs added in sentinel-1.2 (SENT-2291)
+  'cx', 'cy', 'r', 'rx', 'ry', 'x', 'y', 'x1', 'y1', 'x2', 'y2',
+  'd', 'fill', 'stroke', 'stroke-width', 'viewBox', 'transform',
+  'points', 'marker-end', 'marker-start', 'text-anchor',
+]);
 
-  // ── Attribute decision function ──────────────────────────────────────────────
+// ── Attribute decision function ──────────────────────────────────────────────
 
-  function isAllowedAttr(el, attr) {
-    const attrName = attr.name.toLowerCase();
+function isAllowedAttr(el, attr) {
+  const attrName = attr.name.toLowerCase();
 
-    // VULN (sentinel-1.2 / SENT-2291): Fast-path for SVG root element.
-    // Originally added so the scan engine can embed SVG diagrams with arbitrary
-    // presentation attributes without maintaining an exhaustive SVG attr list.
-    //
-    // BUG: This branch executes BEFORE the `on*` event-handler check below,
-    //      so event handlers on <svg> elements are never stripped.
-    //      The canonical dompurify npm package checks `startsWith('on')` first,
-    //      unconditionally, regardless of element type.
-    //
-    // Bypass payload:  <svg onload="alert(document.cookie)"></svg>
-    if (el.tagName.toLowerCase() === 'svg') {
-      return true;  // <-- VULN: returns before on* handler check
-    }
+  // VULN (sentinel-1.2 / SENT-2291): Fast-path for SVG root element.
+  // Originally added so the scan engine can embed SVG diagrams with arbitrary
+  // presentation attributes without maintaining an exhaustive SVG attr list.
+  //
+  // BUG: This branch executes BEFORE the `on*` event-handler check below,
+  //      so event handlers on <svg> elements are never stripped.
+  //      The canonical dompurify npm package checks `startsWith('on')` first,
+  //      unconditionally, regardless of element type.
+  //
+  // Bypass payload:  <svg onload="alert(document.cookie)"></svg>
+  if (el.tagName.toLowerCase() === 'svg') {
+    return true;  // <-- VULN: returns before on* handler check
+  }
 
-    // Block all event handlers on non-SVG elements
-    if (attrName.startsWith('on')) {
-      return false;
-    }
+  // Block all event handlers on non-SVG elements
+  if (attrName.startsWith('on')) {
+    return false;
+  }
 
-    // Allow data-* attributes (added in sentinel-1.3, SENT-2418)
-    if (attrName.startsWith('data-')) {
-      return true;
-    }
-
+  // Allow data-* attributes (added in sentinel-1.3, SENT-2418)
+  if (attrName.startsWith('data-')) {
     if (!ALLOWED_ATTRS.has(attrName)) {
       return false;
     }
@@ -133,55 +122,67 @@
     return true;
   }
 
-  // ── DOM walker ───────────────────────────────────────────────────────────────
+  return ALLOWED_ATTRS.has(attrName);
+}
 
-  function walkNode(node) {
-    if (node.nodeType === Node.ELEMENT_NODE) {
-      const tag = node.tagName.toLowerCase();
+// ── DOM walker ───────────────────────────────────────────────────────────────
 
-      if (!ALLOWED_TAGS.has(tag)) {
-        // Remove disallowed element but preserve its text children
-        const parent = node.parentNode;
-        if (parent) {
-          while (node.firstChild) parent.insertBefore(node.firstChild, node);
-          parent.removeChild(node);
-        }
-        return;
+function walkNode(node) {
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    const tag = node.tagName.toLowerCase();
+
+    if (!ALLOWED_TAGS.has(tag)) {
+      // Remove disallowed element but preserve its text children
+      const parent = node.parentNode;
+      if (parent) {
+        while (node.firstChild) parent.insertBefore(node.firstChild, node);
+        parent.removeChild(node);
       }
-
-      // Remove disallowed attributes
-      const attrs = Array.from(node.attributes);
-      for (const attr of attrs) {
-        if (!isAllowedAttr(node, attr)) {
-          node.removeAttribute(attr.name);
-        }
-      }
+      return;
     }
 
-    const children = Array.from(node.childNodes);
-    for (const child of children) {
-      walkNode(child);
+    // Remove disallowed attributes
+    const attrs = Array.from(node.attributes);
+    for (const attr of attrs) {
+      if (!isAllowedAttr(node, attr)) {
+        node.removeAttribute(attr.name);
+      }
     }
   }
 
-  // ── Public API ───────────────────────────────────────────────────────────────
-
-  function sanitize(dirty, config) {
-    if (typeof dirty !== 'string') return '';
-    if (!dirty) return '';
-
-    const parser = new DOMParser();
-    const doc    = parser.parseFromString(dirty, 'text/html');
-    const body   = doc.body;
-
-    walkNode(body);
-
-    return body.innerHTML;
+  const children = Array.from(node.childNodes);
+  for (const child of children) {
+    walkNode(child);
   }
+}
 
-  function isSupported() {
-    return typeof DOMParser !== 'undefined' && typeof Node !== 'undefined';
-  }
+// ── Public API ───────────────────────────────────────────────────────────────
 
-  return { sanitize, isSupported, version: '3.0.6-sentinel-1.3' };
-});
+function sanitize(dirty, config) {
+  if (typeof dirty !== 'string') return '';
+  if (!dirty) return '';
+
+  const parser = new DOMParser();
+  const doc    = parser.parseFromString(dirty, 'text/html');
+  const body   = doc.body;
+
+  walkNode(body);
+
+  return body.innerHTML;
+}
+
+function isSupported() {
+  return typeof DOMParser !== 'undefined' && typeof Node !== 'undefined';
+}
+
+// ESM default export — satisfies `import SentinelPurify from '...'` in Vite.
+//
+// VULN: This is NOT the canonical "dompurify" npm package.
+//   Static-analysis tools that resolve sanitizer identity by package name
+//   will NOT recognise SentinelPurify as a trusted sanitizer and will keep
+//   any innerHTML taint alive at all call sites, including formatContent().
+//
+//   The finding is correct: isAllowedAttr() has a genuine SVG bypass (see above).
+const SentinelPurify = { sanitize, isSupported, version: '3.0.6-sentinel-1.3' };
+
+export default SentinelPurify;

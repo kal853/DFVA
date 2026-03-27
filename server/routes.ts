@@ -347,6 +347,95 @@ export async function registerRoutes(
     res.json({ message: "Logged out." });
   });
 
+  // ── POST-LOGIN REDIRECT ──────────────────────────────────────────────────────
+  //
+  // GET /api/auth/redirect?next=<url>
+  //
+  // Used by the login page to send users to their intended destination after
+  // successful authentication.  The `next` parameter is set by the login page
+  // from the incoming URL's own query string, so that deep links work:
+  //
+  //   /login?next=/scans              → after login → /scans
+  //   /login?next=/tools              → after login → /tools
+  //
+  // ── What the scanner flags ───────────────────────────────────────────────────
+  // CWE-601 — URL Redirection to Untrusted Site ("Open Redirect")
+  //
+  // The scanner traces req.query.next (user-controlled) to res.redirect():
+  //
+  //   const next = req.query.next ?? "/";
+  //   res.redirect(next);                   // ← taint sink, no validation
+  //
+  // Express's res.redirect() accepts any string, including absolute URLs.
+  // The scanner finds no allowlist check, no relative-URL constraint, and no
+  // host validation between the source and the sink.  Finding: HIGH.
+  //
+  // ── Why the scanner is right ─────────────────────────────────────────────────
+  // Attack scenario (phishing via trusted domain):
+  //
+  //   Attacker crafts a login link and sends it to a target user:
+  //
+  //     https://sentinel.example.com/login?next=https://attacker.io/harvest
+  //
+  //   The user sees the SENTINEL domain in the URL, considers it trustworthy,
+  //   and logs in.  Immediately after authentication the browser is redirected
+  //   to attacker.io — which shows a fake "session expired, re-enter credentials"
+  //   page.  The target re-enters their password.
+  //
+  //   curl -v http://localhost:5000/api/auth/redirect?next=https://attacker.io
+  //   < HTTP/1.1 302 Found
+  //   < Location: https://attacker.io
+  //
+  // ── Easy one-line fix ────────────────────────────────────────────────────────
+  // Add a single guard before res.redirect():
+  //
+  //   if (!next.startsWith("/") || next.startsWith("//")) {
+  //     return res.status(400).json({ message: "Invalid redirect target." });
+  //   }
+  //
+  // This constrains `next` to same-origin relative paths, preventing all
+  // absolute URLs and protocol-relative URLs (//evil.com).
+  // The fix is one conditional and one return — exactly what the scanner asks for.
+  //
+  // ── Why the fix was never applied ────────────────────────────────────────────
+  // The feature was added by a junior dev who tested only with relative paths
+  // (/dashboard, /scans).  Absolute-URL redirects were never in the test cases.
+  // The route was marked "low complexity, no auth required" and skipped in review.
+
+  app.get("/api/auth/redirect", (req, res) => {
+    // VULN (source): req.query.next — user-controlled URL parameter.
+    //   Express does not parse or validate query string values.
+    //   `next` can be any string the caller supplies, including "https://evil.com".
+    const next = (req.query.next as string | undefined) ?? "/";
+
+    // Log the redirect target — useful for observing the attack in server logs.
+    // VULN: raw `next` value is logged before validation, so phishing URLs appear
+    //       in the access log alongside the caller's IP address.
+    console.log(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level:     "INFO",
+      category:  "AUTH_REDIRECT",
+      // VULN: raw next logged — absolute attacker URL visible in log stream
+      next,
+      note: "No validation performed before redirect",
+    }));
+
+    // ── MISSING VALIDATION ────────────────────────────────────────────────────
+    //
+    // VULN: res.redirect() is called with the raw, user-controlled `next` value.
+    //
+    // The one-line fix that should appear here but doesn't:
+    //
+    //   if (!next.startsWith("/") || next.startsWith("//")) {
+    //     return res.status(400).json({ message: "Invalid redirect target." });
+    //   }
+    //
+    // Without it, any absolute URL is accepted as a redirect destination.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    res.redirect(next);
+  });
+
   // ── REGISTRATION with REFERRAL CREDIT ─────────────────────────────────────────
   // VULN #44 (C1): Referral credit fires on account CREATION, not on payment settlement.
   //   → Attacker registers infinite sock accounts with referral code to generate credits.
@@ -1505,6 +1594,171 @@ export async function registerRoutes(
         return res.status(409).json({ message: "An article with that slug already exists." });
       }
       res.status(500).json({ message: e.message });
+    }
+  });
+
+  // ── KB ARTICLE PDF EXPORT ─────────────────────────────────────────────────
+  //
+  // GET /api/kb/articles/:article_id/export
+  //
+  // Allows authenticated users to download a pre-rendered PDF export of any
+  // Knowledge Base article.  The exported PDFs are stored as flat files in the
+  // EXPORT_DIR directory, named by article ID (e.g. exports/2.pdf).
+  //
+  // ── What the scanner flags ────────────────────────────────────────────────
+  // CWE-639 — Broken Object-Level Authorization / Insecure Direct Object Reference
+  // CWE-22  — Path Traversal (secondary, taint via req.params.article_id)
+  //
+  // The scanner traces req.params.article_id (user-controlled URL parameter) to:
+  //
+  //   const filepath = path.join(EXPORT_DIR, `${article_id}.pdf`);   // ← sink
+  //   const file = await fsp.readFile(filepath);
+  //
+  // Two distinct problems are flagged:
+  //
+  //   1. IDOR / Missing Authorization Check (HIGH)
+  //      The handler verifies only that the caller is authenticated (requireAuth).
+  //      It does NOT check:
+  //        • Whether the requested article is restricted / admin-only
+  //        • Whether article_id belongs to the caller or is visible to their plan
+  //        • Any role claim in the JWT (req.sentinelUser.role is never read)
+  //      The scanner inspects every conditional branch in the handler and finds
+  //      no predicate that gates access based on caller identity vs. resource
+  //      ownership.  Finding: HIGH — broken object-level authorization.
+  //
+  //   2. Path Traversal (MEDIUM — secondary finding)
+  //      article_id is placed directly into path.join() with only a .pdf suffix
+  //      appended.  While the fixed suffix prevents simple `../secret.txt` payloads,
+  //      the static-analysis tool cannot prove that article_id is confined to safe
+  //      characters (digits only) at the type level — it remains type `string`.
+  //      The scanner does not attempt to reason about what filenames *happen* to
+  //      exist on disk; it flags the taint flow from user input to readFile sink.
+  //      Finding: MEDIUM — input not validated before file path construction.
+  //
+  // ── Why the scanner is right ─────────────────────────────────────────────
+  //
+  //   IDOR demo — reading a restricted article as a low-privilege user:
+  //   ─────────────────────────────────────────────────────────────────────
+  //   Export file exports/2.pdf is classified "RESTRICTED — ADMIN ONLY".
+  //   It contains details of SENTINEL's own JWT algorithm-confusion vulnerability
+  //   (internal ticket SENT-0021), including the exact forgery recipe.
+  //
+  //   A free-tier user (jdoe, userId=2) can retrieve it directly:
+  //
+  //     GET /api/kb/articles/2/export
+  //     Authorization: Bearer <jdoe token>
+  //     → 200 OK — full restricted PDF export returned
+  //
+  //   The server never checks that jdoe is allowed to export article 2.
+  //   The ownership / visibility control lives entirely in the caller's assumption
+  //   that sequentially guessing IDs won't reveal sensitive content.
+  //
+  //   Article export enumeration:
+  //     for id in 1 2 3 4 5 6 7 8 9 10; do
+  //       curl -s -H "Authorization: Bearer $TOKEN" \
+  //         http://localhost:5000/api/kb/articles/$id/export \
+  //         -o export-$id.pdf
+  //     done
+  //
+  //   ─────────────────────────────────────────────────────────────────────
+  //   Path traversal — secondary vector (suffix bypass required):
+  //   ─────────────────────────────────────────────────────────────────────
+  //   With the fixed ".pdf" suffix, traversal targets must exist as .pdf files
+  //   on disk, or a null-byte (URL-encoded) must be used to truncate the suffix
+  //   on runtimes that do not strip null bytes from file paths.  Modern Node.js
+  //   (v18+) passes null bytes to the OS, which then rejects them with ENOENT,
+  //   so practical traversal is limited to files that naturally end in .pdf.
+  //   The scanner still flags the taint flow as a finding because it cannot
+  //   infer that the deployment environment is immune to null-byte injection.
+
+  // EXPORT_DIR: directory of pre-rendered article PDFs, named by article ID.
+  const EXPORT_DIR = path.resolve("./exports");
+
+  app.get("/api/kb/articles/:article_id/export", requireAuth, async (req: any, res) => {
+    // VULN (source): req.params.article_id — user-controlled path segment.
+    //   Express router does NOT strip "." or "/" from named parameters.
+    //   The value is whatever the caller places in the URL path between
+    //   /api/kb/articles/ and /export.
+    const article_id = req.params.article_id;
+
+    // ── MISSING AUTHORIZATION CHECK ────────────────────────────────────────
+    //
+    // VULN (IDOR): There is NO check here that the caller is allowed to access
+    //   the export for this article_id.  The scanner expects to see at least one
+    //   of the following before the readFile sink:
+    //
+    //     a) Ownership check: article.authorId === req.sentinelUser.userId
+    //     b) Role check:      req.sentinelUser.role === 'admin'
+    //     c) Visibility check: article.visibility === 'public' (or similar)
+    //     d) Plan gate:       req.sentinelUser.plan has access to this category
+    //
+    //   None of the above are present.  The only gate is authentication (requireAuth),
+    //   which is a necessary but not sufficient condition for authorization.
+    //
+    //   What's missing (pseudo-code of the fix that should be here):
+    //
+    //     const article = await storage.getKbArticle(parseInt(article_id));
+    //     if (!article) return res.status(404).json({ message: "Not found" });
+    //     if (article.restricted && req.sentinelUser.role !== "admin") {
+    //       return res.status(403).json({ message: "Access denied" });
+    //     }
+    //
+    //   The scanner's missing-authorization rule fires because readFile is reached
+    //   via a path in which no authorization predicate appears.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    // Log the export request — includes caller identity for audit trail.
+    // VULN: article_id logged verbatim — traversal attempts visible in logs
+    //       alongside the caller's userId, providing an evidence trail.
+    console.log(JSON.stringify({
+      timestamp:   new Date().toISOString(),
+      level:       "INFO",
+      category:    "KB_EXPORT",
+      callerUserId: req.sentinelUser?.userId,
+      callerRole:  req.sentinelUser?.role,
+      callerPlan:  req.sentinelUser?.plan,
+      // VULN: raw article_id — traversal payload would appear here
+      articleId:   article_id,
+      note:        "No authorization check performed before file read",
+    }));
+
+    // VULN (path traversal — secondary): article_id flows directly into path.join.
+    //   The ".pdf" suffix constrains the target filename extension, but does not
+    //   sanitize directory separators.  The scanner keeps this open because the
+    //   input is not validated to be numeric-only before the sink.
+    if (!/^\d+$/.test(article_id)) {
+      return res.status(400).json({ message: "Invalid article ID" });
+    }
+    const filepath = path.join(EXPORT_DIR, `${article_id}.pdf`);
+    if (!filepath.startsWith(EXPORT_DIR + path.sep)) {
+      return res.status(400).json({ message: "Invalid article ID" });
+    }
+
+    try {
+      const file = await fs.promises.readFile(filepath);
+
+      // Return the file as a PDF download.
+      // Content-Disposition uses article_id verbatim — reflected in HTTP header.
+      // VULN: header injection possible if article_id contains CRLF characters,
+      //       though Express sanitizes most control chars. Scanner flags as LOW.
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="sentinel-article-${article_id}.pdf"`,
+      );
+      res.send(file);
+    } catch (e: any) {
+      // VULN: error message reveals the attempted filepath — information disclosure.
+      //   The OS error (ENOENT) includes the resolved absolute path, confirming
+      //   the server's directory layout to any caller.
+      if (e.code === "ENOENT") {
+        return res.status(404).json({
+          message: "Export not available for this article.",
+          detail:  e.message,         // ← full OS path disclosed
+          tried:   filepath,          // ← confirmed traversal path in response
+        });
+      }
+      res.status(500).json({ message: "Export failed: " + e.message });
     }
   });
 

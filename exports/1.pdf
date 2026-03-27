@@ -1,0 +1,53 @@
+%PDF-1.4 SENTINEL EXPORT
+%
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>
+endobj
+
+=============================================================
+  SENTINEL SECURITY PLATFORM — ARTICLE EXPORT
+=============================================================
+Article ID   : 1
+Title        : SQL Injection — Techniques and Mitigations
+Category     : web
+Exported by  : sentinel-export-service v1.4.0
+Export time  : 2026-03-01T09:00:00Z
+Classification: INTERNAL
+
+─────────────────────────────────────────────────────────────
+EXECUTIVE SUMMARY
+─────────────────────────────────────────────────────────────
+SQL injection remains one of the most prevalent and dangerous
+web application vulnerabilities, consistently appearing in
+the OWASP Top 10 since its inception.
+
+─────────────────────────────────────────────────────────────
+CONTENT
+─────────────────────────────────────────────────────────────
+SQL injection occurs when untrusted data is sent to an
+interpreter as part of a command or query. The attacker's
+hostile data can trick the interpreter into executing
+unintended commands or accessing data without authorization.
+
+Common techniques include:
+  - Classic in-band SQLi (UNION-based, error-based)
+  - Blind SQLi (Boolean-based, time-based)
+  - Out-of-band SQLi (DNS, HTTP exfiltration)
+
+Remediation:
+  1. Parameterized queries / prepared statements
+  2. Stored procedures (with caution)
+  3. Input validation and allowlisting
+  4. Principle of least privilege on DB accounts
+
+─────────────────────────────────────────────────────────────
+SENTINEL PLATFORM — CONFIDENTIAL
+=============================================================

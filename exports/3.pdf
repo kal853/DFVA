@@ -1,0 +1,39 @@
+%PDF-1.4 SENTINEL EXPORT
+%
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+
+=============================================================
+  SENTINEL SECURITY PLATFORM — ARTICLE EXPORT
+=============================================================
+Article ID   : 3
+Title        : Server-Side Request Forgery (SSRF) — Attack Atlas
+Category     : web
+Exported by  : sentinel-export-service v1.4.0
+Export time  : 2026-03-15T11:00:00Z
+Classification: INTERNAL
+
+─────────────────────────────────────────────────────────────
+EXECUTIVE SUMMARY
+─────────────────────────────────────────────────────────────
+SSRF allows an attacker to induce the server-side application
+to make HTTP requests to an arbitrary domain of the attacker's
+choosing. When the server can reach internal infrastructure,
+SSRF becomes a critical finding.
+
+─────────────────────────────────────────────────────────────
+SENTINEL PLATFORM TEST TARGETS
+─────────────────────────────────────────────────────────────
+The SENTINEL network scanner tool (POST /api/tools/ping) is
+vulnerable to SSRF. The host field is not validated against
+an allowlist.
+
+Test payloads:
+  {"host": "http://169.254.169.254/latest/meta-data/"}
+  {"host": "http://0.0.0.0:5000/api/admin/credentials"}
+  {"host": "http://localhost:5432/"}
+
+─────────────────────────────────────────────────────────────
+SENTINEL PLATFORM — CONFIDENTIAL
+=============================================================

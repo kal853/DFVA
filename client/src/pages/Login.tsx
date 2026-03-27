@@ -13,6 +13,25 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  /*
+   * VULN (CWE-601 — Open Redirect, client-side source):
+   *
+   * `next` is read verbatim from the URL query string.  Any value the caller
+   * supplies ends up in the `next` parameter of GET /api/auth/redirect.
+   *
+   * Normal deep-link use:
+   *   /login?next=/scans   → after login → GET /api/auth/redirect?next=/scans
+   *
+   * Phishing attack:
+   *   /login?next=https://attacker.io/harvest
+   *   → after login → GET /api/auth/redirect?next=https://attacker.io/harvest
+   *   → server issues 302 to attacker.io
+   *
+   * The client reads the value but performs no validation.  All validation
+   * responsibility falls on the backend — which also does not validate (see route).
+   */
+  const nextParam = new URLSearchParams(window.location.search).get("next") ?? "/";
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!username.trim() || !password) return;
@@ -20,7 +39,25 @@ export default function Login() {
     setError(null);
     try {
       await login(username.trim(), password);
-      navigate("/");
+      /*
+       * VULN: POST-LOGIN REDIRECT via /api/auth/redirect
+       *
+       * After a successful login the browser navigates to the backend redirect
+       * endpoint, which performs res.redirect(next) with no validation.
+       *
+       * `nextParam` comes from window.location.search — the caller controls it.
+       * It is appended directly to the redirect URL and sent to the server.
+       *
+       * Attack:
+       *   Attacker sends victim:  /login?next=https://evil.com
+       *   Victim logs in → browser hits /api/auth/redirect?next=https://evil.com
+       *   Server issues 302 → victim lands on evil.com
+       *
+       * Easy fix on the SERVER: one guard clause in the route handler.
+       * Easy fix on the CLIENT: validate nextParam starts with "/" before use.
+       * Neither fix is present — two independent opportunities to stop the attack.
+       */
+      window.location.href = `/api/auth/redirect?next=${encodeURIComponent(nextParam)}`;
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -111,7 +148,25 @@ export default function Login() {
             </button>
           </form>
 
-          <div className="mt-6 pt-5 border-t border-border/50 text-center text-xs text-muted-foreground">
+          {/*
+            * VULN (CWE-601 — information disclosure of redirect target):
+            * The `nextParam` value is rendered verbatim in the UI.
+            * An attacker can pre-fill a convincing redirect destination
+            * (e.g. /settings?session_expired=1) to make the phishing link
+            * look more legitimate before the user even clicks Sign In.
+            */}
+          {nextParam !== "/" && (
+            <div
+              data-testid="text-redirect-hint"
+              className="mt-4 text-xs text-muted-foreground/60 text-center truncate"
+            >
+              You'll be redirected to{" "}
+              <span className="font-mono text-muted-foreground">{nextParam}</span>
+              {" "}after sign in.
+            </div>
+          )}
+
+          <div className="mt-4 pt-5 border-t border-border/50 text-center text-xs text-muted-foreground">
             Access is restricted to authorised personnel only.
           </div>
         </div>
