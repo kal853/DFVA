@@ -1726,7 +1726,13 @@ export async function registerRoutes(
     //   The ".pdf" suffix constrains the target filename extension, but does not
     //   sanitize directory separators.  The scanner keeps this open because the
     //   input is not validated to be numeric-only before the sink.
+    if (!/^\d+$/.test(article_id)) {
+      return res.status(400).json({ message: "Invalid article ID" });
+    }
     const filepath = path.join(EXPORT_DIR, `${article_id}.pdf`);
+    if (!filepath.startsWith(EXPORT_DIR + path.sep)) {
+      return res.status(400).json({ message: "Invalid article ID" });
+    }
 
     try {
       const file = await fs.promises.readFile(filepath);
