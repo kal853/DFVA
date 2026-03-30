@@ -1,12 +1,12 @@
 import { db, pool } from "./db";
 import {
   users, posts, invoices, walletTransactions, products, ragDocuments, ragChunks, scanJobs, tickets,
-  workspaces, workspaceMembers, workspaceInvitations, kbArticles,
+  workspaces, workspaceMembers, workspaceInvitations, kbArticles, coupons,
   type User, type InsertUser, type Post, type InsertPost,
   type Invoice, type WalletTransaction, type Product, type InsertProduct,
   type RagDocument, type RagChunk, type ScanJob, type PlanKey, type Ticket,
   type Workspace, type WorkspaceMember, type WorkspaceInvitation,
-  type KbArticle, type InsertKbArticle,
+  type KbArticle, type InsertKbArticle, type Coupon,
 } from "@shared/schema";
 import { eq, sql, ilike, lte, and, inArray, desc } from "drizzle-orm";
 
@@ -79,6 +79,14 @@ export interface IStorage {
   getKbArticle(id: number): Promise<KbArticle | undefined>;
   getKbArticleBySlug(slug: string): Promise<KbArticle | undefined>;
   createKbArticle(data: InsertKbArticle): Promise<KbArticle>;
+  // Coupons
+  getCouponByCode(code: string): Promise<Coupon | undefined>;
+  createCoupon(data: { code: string; type: string; value: string; maxUses?: number | null }): Promise<Coupon>;
+  // VULN: increments the GLOBAL counter only — no per-user tracking.
+  //       The calling route never records which userId redeemed this code,
+  //       so the same user can redeem the same code as many times as they
+  //       want until the global maxUses ceiling is reached.
+  incrementCouponUses(id: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -451,6 +459,37 @@ export class DatabaseStorage implements IStorage {
   async createKbArticle(data: InsertKbArticle): Promise<KbArticle> {
     const [row] = await db.insert(kbArticles).values(data).returning();
     return row;
+  }
+
+  // ── Coupons ─────────────────────────────────────────────────────────────────
+
+  async getCouponByCode(code: string): Promise<Coupon | undefined> {
+    const [row] = await db.select().from(coupons).where(eq(coupons.code, code));
+    return row;
+  }
+
+  async createCoupon(data: { code: string; type: string; value: string; maxUses?: number | null }): Promise<Coupon> {
+    const [row] = await db.insert(coupons).values({
+      code:     data.code,
+      type:     data.type,
+      value:    data.value,
+      maxUses:  data.maxUses ?? null,
+      timesUsed: 0,
+    }).returning();
+    return row;
+  }
+
+  // VULN: increments the global timesUsed counter only.
+  //   No coupon_redemptions table exists.  No (userId, couponId) uniqueness is
+  //   enforced anywhere.  The only guard in the calling route is:
+  //     if (maxUses !== null && timesUsed >= maxUses) → reject
+  //   That guard operates on the TOTAL count across ALL users, not per-user.
+  //   A single user calling the redeem endpoint 500 times exhausts a code with
+  //   maxUses=500 — consuming the entire global budget alone.
+  async incrementCouponUses(id: number): Promise<void> {
+    await db.update(coupons)
+      .set({ timesUsed: sql`${coupons.timesUsed} + 1` })
+      .where(eq(coupons.id, id));
   }
 }
 

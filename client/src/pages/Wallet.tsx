@@ -41,6 +41,8 @@ export default function Wallet() {
   const qc = useQueryClient();
   const [copied, setCopied] = useState(false);
   const [showDowngrade, setShowDowngrade] = useState(false);
+  const [promoCode, setPromoCode] = useState("");
+  const [promoResult, setPromoResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const userId = user?.id ?? 0;
 
@@ -66,6 +68,47 @@ export default function Wallet() {
     queryKey: ["/api/tickets", userId],
     queryFn: () => fetch(`/api/tickets?userId=${userId}`).then(r => r.json()),
     enabled: !!userId,
+  });
+
+  /*
+   * VULN (Business Logic — Missing per-user redemption gate, CWE-841):
+   *
+   * This mutation calls POST /api/wallet/redeem-promo with whatever code the
+   * user types.  The server checks:
+   *   1. Does the code exist?          → yes/no
+   *   2. Is the global cap not hit?    → timesUsed < maxUses
+   * It does NOT check: has THIS user already redeemed this code?
+   *
+   * Calling this mutation in a loop adds $10/$20/$25 per iteration indefinitely
+   * (for codes with no maxUses, like SENTINEL10, there is no global cap either).
+   *
+   * The UI shows a success message each time — no client-side guard either.
+   */
+  const redeemPromoMutation = useMutation({
+    mutationFn: async (code: string) => {
+      const token = localStorage.getItem("sentinel_token");
+      const res = await fetch("/api/wallet/redeem-promo", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": token ? `Bearer ${token}` : "",
+        },
+        body: JSON.stringify({ code }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message);
+      return data;
+    },
+    onSuccess: (data) => {
+      setPromoResult({ ok: true, message: data.message });
+      setPromoCode("");
+      qc.invalidateQueries({ queryKey: ["/api/billing", userId] });
+      qc.invalidateQueries({ queryKey: ["/api/wallet/transactions", userId] });
+      refreshUser();
+    },
+    onError: (e: any) => {
+      setPromoResult({ ok: false, message: e.message });
+    },
   });
 
   // VULN: downgrade calls processDowngrade — two non-atomic writes (C3)
@@ -191,6 +234,75 @@ export default function Wallet() {
           </div>
         </div>
       )}
+
+      {/*
+        * VULN (Business Logic — promo code redemption without per-user tracking):
+        *
+        * The UI presents a normal promo code input.  The endpoint it calls
+        * (POST /api/wallet/redeem-promo) validates code existence and a global
+        * usage cap, but never records which user redeemed which code.
+        *
+        * The same user submitting this form repeatedly receives $10/$20/$25
+        * on each submission with no server-side block.
+        *
+        * Known redeemable codes (seeded on startup):
+        *   WELCOME20   → $20  (maxUses: 500, per-user: unlimited)
+        *   SENTINEL10  → $10  (maxUses: none, per-user: unlimited)
+        *   BLACKHAT25  → $25  (maxUses: 200, per-user: unlimited)
+        */}
+      <div
+        data-testid="card-promo-redeem"
+        className="rounded-xl border border-border/60 bg-card/40 p-5 mb-8"
+      >
+        <div className="flex items-center gap-2 mb-3">
+          <Ticket className="w-4 h-4 text-primary" />
+          <h2 className="text-sm font-semibold text-foreground">Redeem Promo Code</h2>
+        </div>
+        <p className="text-xs text-muted-foreground mb-4">
+          Have a promotional code? Enter it below to credit your wallet instantly.
+        </p>
+
+        <div className="flex gap-2">
+          <input
+            data-testid="input-promo-code"
+            type="text"
+            value={promoCode}
+            onChange={e => { setPromoCode(e.target.value.toUpperCase()); setPromoResult(null); }}
+            onKeyDown={e => e.key === "Enter" && promoCode && redeemPromoMutation.mutate(promoCode)}
+            placeholder="e.g. WELCOME20"
+            className="flex-1 bg-background border border-border/60 rounded-lg px-3 py-2 text-sm font-mono text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:border-primary/50"
+          />
+          <button
+            data-testid="button-redeem-promo"
+            onClick={() => promoCode && redeemPromoMutation.mutate(promoCode)}
+            disabled={!promoCode || redeemPromoMutation.isPending}
+            className="flex items-center gap-1.5 px-4 py-2 bg-primary/10 hover:bg-primary/20 border border-primary/30 hover:border-primary/50 text-primary text-sm font-semibold rounded-lg transition-all disabled:opacity-40"
+          >
+            {redeemPromoMutation.isPending ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Zap className="w-3.5 h-3.5" />
+            )}
+            Apply
+          </button>
+        </div>
+
+        {promoResult && (
+          <div
+            data-testid="text-promo-result"
+            className={`mt-3 flex items-center gap-2 text-xs rounded-lg px-3 py-2 border ${
+              promoResult.ok
+                ? "text-green-400 bg-green-500/10 border-green-500/20"
+                : "text-red-400 bg-red-500/10 border-red-500/20"
+            }`}
+          >
+            {promoResult.ok
+              ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+              : <AlertCircle className="w-3.5 h-3.5 shrink-0" />}
+            {promoResult.message}
+          </div>
+        )}
+      </div>
 
       {/* Referral code — C1 vector */}
       {refCode && (

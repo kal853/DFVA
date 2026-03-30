@@ -203,6 +203,12 @@ export async function registerRoutes(
       if ((await storage.getProducts()).length === 0) {
         for (const t of SEED_TOOLS) await storage.createProduct(t as any);
       }
+      // Seed promo codes — VULN: no per-user redemption tracking on the redeem route
+      if (!(await storage.getCouponByCode("WELCOME20"))) {
+        await storage.createCoupon({ code: "WELCOME20", type: "fixed",   value: "20.00", maxUses: 500 });
+        await storage.createCoupon({ code: "SENTINEL10", type: "fixed",  value: "10.00", maxUses: null });
+        await storage.createCoupon({ code: "BLACKHAT25", type: "fixed",  value: "25.00", maxUses: 200 });
+      }
     } catch (e) { console.error("Seed failed:", e); }
   }, 1000);
 
@@ -306,6 +312,152 @@ export async function registerRoutes(
       await storage.logWalletTransaction(userId, amount, "topup", "Credit top-up");
       res.json({ message: `Topped up $${amount}`, walletBalance: user.walletBalance });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // ── PROMO CODE REDEMPTION ────────────────────────────────────────────────────
+  //
+  // POST /api/wallet/redeem-promo
+  // Body: { code: string }
+  //
+  // Allows authenticated users to redeem a promotional credit code.
+  // A valid code credits the face value to the caller's wallet.
+  //
+  // ── What the scanner flags ────────────────────────────────────────────────
+  // Business Logic Flaw — Missing per-user redemption enforcement (CWE-841)
+  //
+  // The handler looks up the coupon, validates it exists, checks the GLOBAL
+  // usage counter against maxUses, credits the wallet, and increments timesUsed.
+  //
+  // What it NEVER does:
+  //   • Query a redemption history table for (userId, couponId) pairs
+  //   • Check whether THIS user has already redeemed THIS code
+  //   • Insert a record that would prevent a second redemption
+  //
+  // A semantic/business-logic scanner inspects the full handler and asks:
+  //   "After crediting the wallet, is there any write that would prevent an
+  //    identical future request by the same user from succeeding?"
+  // The answer is no.  incrementCouponUses() raises a shared counter that
+  // enforces a global cap, not a per-user cap.
+  //
+  // ── Why the scanner is right ─────────────────────────────────────────────
+  //
+  //   Normal intent:   each user may redeem WELCOME20 once → +$20
+  //   Actual behavior: a single user may redeem WELCOME20 500 times → +$10,000
+  //
+  //   SENTINEL10 has maxUses: null → infinite global uses → infinite per-user uses.
+  //   A user can loop this endpoint indefinitely:
+  //
+  //     while true; do
+  //       curl -s -X POST http://localhost:5000/api/wallet/redeem-promo \
+  //         -H "Authorization: Bearer $TOKEN" \
+  //         -H "Content-Type: application/json" \
+  //         -d '{"code":"SENTINEL10"}' | jq .walletBalance
+  //     done
+  //
+  //   Balance grows by $10 per iteration with no rate limit and no per-user gate.
+  //
+  // ── Fix ───────────────────────────────────────────────────────────────────
+  // Add a coupon_redemptions table:
+  //
+  //   CREATE TABLE coupon_redemptions (
+  //     user_id   INTEGER REFERENCES users(id),
+  //     coupon_id INTEGER REFERENCES coupons(id),
+  //     redeemed_at TIMESTAMP DEFAULT now(),
+  //     PRIMARY KEY (user_id, coupon_id)    -- ← one redemption per user per code
+  //   );
+  //
+  // Then in this handler, before crediting:
+  //
+  //   const already = await db.select().from(couponRedemptions)
+  //     .where(and(eq(couponRedemptions.userId, callerId),
+  //                eq(couponRedemptions.couponId, coupon.id)));
+  //   if (already.length > 0) return res.status(409).json({ message: "Already redeemed." });
+  //
+  //   // credit + insert redemption record in a transaction
+  //
+  // The PRIMARY KEY constraint provides a hard database-level guard even against
+  // race conditions — two concurrent requests for the same (user, coupon) pair
+  // would result in a unique-constraint violation on the second insert.
+
+  app.post("/api/wallet/redeem-promo", requireAuth, async (req: any, res) => {
+    const callerId: number = req.sentinelUser?.userId;
+    const { code } = req.body;
+
+    if (!code || typeof code !== "string") {
+      return res.status(400).json({ message: "code is required." });
+    }
+
+    try {
+      // Step 1: Look up the coupon by code.
+      const coupon = await storage.getCouponByCode(code.trim().toUpperCase());
+
+      if (!coupon) {
+        return res.status(404).json({ message: "Invalid promo code." });
+      }
+
+      // Step 2: Check the GLOBAL usage limit.
+      // VULN: this check operates on the total across all users, not per-caller.
+      //       The guard is correct for a global cap but provides zero per-user protection.
+      if (coupon.maxUses !== null && (coupon.timesUsed ?? 0) >= coupon.maxUses) {
+        return res.status(410).json({
+          message: "Promo code has reached its maximum redemption limit.",
+          code,
+        });
+      }
+
+      // ── MISSING CHECK ─────────────────────────────────────────────────────
+      // VULN: There is no query here of the form:
+      //
+      //   SELECT 1 FROM coupon_redemptions
+      //   WHERE user_id = callerId AND coupon_id = coupon.id
+      //
+      // This is the guard that would prevent the same user redeeming twice.
+      // Without it, steps 3 and 4 execute unconditionally on every request
+      // by every user, including the same user making the same request again.
+      // ──────────────────────────────────────────────────────────────────────
+
+      const creditAmount = parseFloat(coupon.value);
+
+      // Step 3: Credit the caller's wallet.
+      const updated = await storage.creditWallet(
+        callerId,
+        creditAmount,
+        `Promo code redeemed: ${coupon.code}`,
+      );
+
+      // Step 4: Increment global usage counter (NOT per-user).
+      // VULN: This is the only write that occurs.  It raises the shared counter
+      //       by 1, which moves the global cap closer but does NOT record that
+      //       callerId has redeemed this coupon.  A second call by the same user
+      //       passes the Step 2 check again (counter went from N to N+1, still
+      //       below maxUses) and reaches Step 3 again.
+      await storage.incrementCouponUses(coupon.id);
+
+      console.log(JSON.stringify({
+        timestamp:   new Date().toISOString(),
+        level:       "INFO",
+        category:    "PROMO_REDEEM",
+        callerId,
+        couponCode:  coupon.code,
+        couponId:    coupon.id,
+        creditAmount,
+        newBalance:  updated.walletBalance,
+        // VULN: per-user redemption count is not tracked anywhere in the system.
+        //       This log line is the only record that this user redeemed this code.
+        //       It cannot be efficiently queried to block duplicate redemptions.
+        note: "No per-user redemption record written — duplicate redemption possible",
+      }));
+
+      res.json({
+        message: `Promo code applied! $${creditAmount.toFixed(2)} credited to your wallet.`,
+        credited: creditAmount,
+        walletBalance: updated.walletBalance,
+        code: coupon.code,
+      });
+
+    } catch (e: any) {
+      res.status(500).json({ message: "Redemption failed: " + e.message });
+    }
   });
 
   // ── AUTH ─────────────────────────────────────────────────────────────────────

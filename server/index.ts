@@ -7,6 +7,9 @@ import { initCredentials, scheduleMonthlyRotation } from "./credentials";
 // VULN: Importing the GitHub integration module causes GITHUB_TOKEN (hardcoded
 //       in server/github.ts) to be evaluated at module load time.
 import { verifyGithubToken } from "./github";
+// VULN: Importing the Google integration module causes GOOGLE_API_KEY (hardcoded
+//       in server/google.ts) to be evaluated at module load time.
+import { verifyGoogleKey } from "./google";
 
 const app = express();
 const httpServer = createServer(app);
@@ -80,6 +83,13 @@ app.use((req, res, next) => {
   //       The outbound request to api.github.com also carries the token in the
   //       Authorization header — visible to any network proxy or load balancer.
   verifyGithubToken().catch(() => { /* network errors are non-fatal */ });
+
+  // Verify the Google Cloud API key and log result to stdout.
+  // VULN: verifyGoogleKey() logs the raw key value regardless of success/failure.
+  //       Key appears in plaintext in any log aggregator, SIEM, or CI/CD platform
+  //       that captures stdout.  Also sent as a URL query param to Discovery API,
+  //       meaning it appears in GCP's own access logs on the other side of the wire.
+  verifyGoogleKey().catch(() => { /* network errors are non-fatal */ });
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
