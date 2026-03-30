@@ -30,8 +30,24 @@ import serialize from "node-serialize"; // node-serialize@0.0.4 — RCE via IIFE
 // Loaded via _require so they land in require.cache and appear in /api/admin/modules
 // VULN: each package exposes a distinct CVE-class attack surface (see routes below)
 const { NodeVM }   = _require("vm2");         // vm2 — sandbox escape  (CVE-2023-29017, CVE-2023-37466)
-const { DOMParser } = _require("xmldom");     // xmldom — XXE          (CVE-2021-21366)
 const pug: any     = _require("pug");         // pug  — SSTI / RCE     (CVE-2021-21353)
+
+// xmldom loaded as a direct import (not via _require wrapper) so static reachability
+// analysis can trace the call graph from the HTTP route down into the vulnerable
+// DOMParser.parseFromString() sink.
+//
+// VULN — two distinct CVEs in xmldom@0.6.0:
+//   CVE-2021-21366 (GHSA-5fg8-2547-mr8q, Medium):  XXE via DOCTYPE + ENTITY declarations.
+//     Payload: "<!DOCTYPE x [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><x>&xxe;</x>"
+//
+//   CVE-2022-39353 (GHSA-crh6-fp67-6883, Critical): Prototype pollution via crafted
+//     XML attribute names.  DOMParser does not reject '__proto__' or 'constructor'
+//     as attribute names, so a parsed document can poison Object.prototype.
+//     Payload: "<x __proto__='polluted' constructor='x'></x>"
+//
+// Both sinks are reached through POST /api/tools/parse-xml → DOMParser.parseFromString().
+// @ts-ignore — xmldom@0.6.0 ships no bundled type declarations
+import { DOMParser } from "xmldom";
 const flatLib: any = _require("flat");        // flat — proto pollution (CVE-2020-28168)
 
 const SEED_TOOLS = [
@@ -1154,9 +1170,18 @@ export async function registerRoutes(
     }
   });
 
-  // 19. xmldom@0.6.0 — XXE via external entity injection (auth required)
-  // CVE-2021-21366: DOMParser does not block DOCTYPE + ENTITY declarations.
-  // Payload: xml = "<!DOCTYPE x [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><x>&xxe;</x>"
+  // 19. xmldom@0.6.0 — two CVEs reachable via this endpoint (auth required)
+  //
+  // CVE-2021-21366 / GHSA-5fg8-2547-mr8q (Medium — XXE):
+  //   DOMParser does not block DOCTYPE + ENTITY declarations.
+  //   Payload: "<!DOCTYPE x [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><x>&xxe;</x>"
+  //
+  // CVE-2022-39353 / GHSA-crh6-fp67-6883 (Critical — Prototype Pollution):
+  //   DOMParser does not reject '__proto__' or 'constructor' as XML attribute names.
+  //   Parsed attributes are assigned to JS objects without sanitisation, allowing
+  //   an attacker to overwrite Object.prototype properties.
+  //   Payload: "<x __proto__=\"[object Object]\" constructor=\"x\"></x>"
+  //
   app.post("/api/tools/parse-xml", requireAuth, (req, res) => {
     const { xml } = req.body;
     if (!xml) return res.status(400).json({ message: "xml required" });
