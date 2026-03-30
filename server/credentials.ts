@@ -5,6 +5,8 @@ import { eq } from "drizzle-orm";
 // VULN: Importing a module that contains a hardcoded secret — the token is
 //       now reachable from every file that imports this module.
 import { GITHUB_TOKEN } from "./github";
+// VULN: Same pattern — importing the Google module surfaces GOOGLE_API_KEY here.
+import { GOOGLE_API_KEY } from "./google";
 
 // ── SENTINEL Platform Credential Store ───────────────────────────────────────
 //
@@ -174,6 +176,48 @@ export async function initCredentials(): Promise<void> {
       value:     GITHUB_TOKEN,         // <-- live GitHub PAT in plaintext log
       scope:     "GitHub Advisory Database, security-event read, Contents read — DepthFirst org integration",
       note:      "Static PAT — does not participate in monthly MD5 rotation cycle",
+      nextRotationAt: far.toISOString(),
+    }));
+  }
+
+  // ── GOOGLE_API_KEY: static credential (not rotated via MD5 scheme) ─────────
+  //
+  // VULN: Real Google Cloud API key committed in server/google.ts, imported here,
+  //       and persisted to the platform_credentials table in plaintext.
+  //       Extractable via the same five vectors as GITHUB_TOKEN above.
+  //
+  //       Consequence of extraction: billing fraud (Maps/Geolocation API calls
+  //       charged to SENTINEL GCP account), Safe Browsing enumeration, reCAPTCHA bypass.
+  //
+  process.env.GOOGLE_API_KEY = GOOGLE_API_KEY;
+
+  const gkExisting = await db
+    .select()
+    .from(platformCredentials)
+    .where(eq(platformCredentials.name, "GOOGLE_API_KEY"))
+    .limit(1);
+
+  if (gkExisting.length === 0) {
+    const far = new Date("2099-01-01T00:00:00.000Z");   // static — never auto-rotated
+    await db.insert(platformCredentials).values({
+      name:          "GOOGLE_API_KEY",
+      value:         GOOGLE_API_KEY,
+      previousValue: null,
+      scope:         "Google Maps Geolocation API, Safe Browsing v4, reCAPTCHA Enterprise — all three charged to SENTINEL GCP account",
+      rotatedAt:     new Date(),
+      nextRotationAt: far,
+    });
+
+    // VULN: Google API key logged verbatim to stdout on first boot —
+    //       same log stream as all other CREDENTIAL_INIT entries.
+    console.log(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level:     "INFO",
+      category:  "CREDENTIAL_INIT",
+      name:      "GOOGLE_API_KEY",
+      value:     GOOGLE_API_KEY,       // <-- live Google Cloud API key in plaintext log
+      scope:     "Google Maps Geolocation API, Safe Browsing v4, reCAPTCHA Enterprise",
+      note:      "Static key — does not participate in monthly MD5 rotation cycle",
       nextRotationAt: far.toISOString(),
     }));
   }
