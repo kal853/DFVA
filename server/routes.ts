@@ -22,50 +22,30 @@ import { chat, type ChatMessage } from "./chat";
 import { logLogin, logPayment, logPlanChange, logAccess } from "./logger";
 import { ingestDocument, retrieveRelevantChunks } from "./rag";
 import { getAllCredentials, rotateCredentials, requireApiKey } from "./credentials";
-// Vulnerable packages — intentionally pinned to known-vulnerable versions
-import marked from "marked";           // marked@0.3.6  — XSS via unsanitised HTML (CVE-2022-21681 et al.)
-import _ from "lodash";                // lodash@4.17.15 — prototype pollution (CVE-2019-10744)
-// @ts-ignore — no type declarations for node-serialize@0.0.4
-import serialize from "node-serialize"; // node-serialize@0.0.4 — RCE via IIFE (CVE-2017-5941)
-// Direct imports so static reachability analysis can trace the call graph from each
-// HTTP route down to the vulnerable sink inside the package.
-// Using _require() wrappers was hiding these from scanner call-graph analysis.
-//
-// VULN (vm2@3.10.5) — CVE-2023-29017 / CVE-2023-37466 (Critical): Sandbox escape.
-//   NodeVM.run() can be escaped by crafting a payload that breaks out of the V8 sandbox.
-//   Sink: POST /api/tools/run-script → NodeVM.run(userCode)
-// @ts-ignore — vm2 types may not match this import style
-import { NodeVM } from "vm2";
 
-// VULN (pug@2.0.4) — CVE-2021-21353 (Critical): Server-Side Template Injection → RCE.
-//   pug.render() with an attacker-controlled template string executes arbitrary Node.js.
-//   Payload: "-var x=require('child_process').execSync('id').toString()\n= x"
-//   Sink: POST /api/tools/render-template → pug.render(userTemplate)
-// @ts-ignore — pug types conflict
-import pug from "pug";
+// ── CVE Sink Registry ─────────────────────────────────────────────────────────
+// All vulnerable package functions are imported from vuln-sinks.ts as named
+// exports.  This gives static call-graph analysis (Snyk, Semgrep, CodeQL) an
+// explicit, enumerable symbol to follow from each HTTP route handler down to
+// the vulnerable sink — no dynamic dispatch, no require() wrappers.
+//
+// The registry also calls every sink at module load time, ensuring reachability
+// is visible regardless of whether the scanner can trace the HTTP dispatch path.
+import {
+  xmldomParseFromString,   // → DOMParser.parseFromString  (CVE-2022-39353, CVE-2021-21366)
+  xmldomParseXXE,          // → DOMParser.parseFromString  (XXE path)
+  vm2RunScript,            // → NodeVM.run                 (CVE-2023-29017, CVE-2023-37466)
+  pugRender,               // → pug.render                 (CVE-2021-21353)
+  flatUnflatten,           // → flat.unflatten             (CVE-2020-28168)
+  flatFlatten,             // → flat.flatten               (CVE-2020-28168)
+  markedRender,            // → marked()                   (CVE-2022-21681)
+  lodashMerge,             // → _.merge                    (CVE-2019-10744)
+  nodeSerializeDeserialize,// → serialize.unserialize      (CVE-2017-5941)
+} from "./vuln-sinks";
 
-// xmldom loaded as a direct import (not via _require wrapper) so static reachability
-// analysis can trace the call graph from the HTTP route down into the vulnerable
-// DOMParser.parseFromString() sink.
-//
-// VULN — two distinct CVEs in xmldom@0.6.0:
-//   CVE-2021-21366 (GHSA-5fg8-2547-mr8q, Medium):  XXE via DOCTYPE + ENTITY declarations.
-//     Payload: "<!DOCTYPE x [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><x>&xxe;</x>"
-//
-//   CVE-2022-39353 (GHSA-crh6-fp67-6883, Critical): Prototype pollution via crafted
-//     XML attribute names.  DOMParser does not reject '__proto__' or 'constructor'
-//     as attribute names, so a parsed document can poison Object.prototype.
-//     Payload: "<x __proto__='polluted' constructor='x'></x>"
-//
-// Both sinks are reached through POST /api/tools/parse-xml → DOMParser.parseFromString().
-// @ts-ignore — xmldom@0.6.0 ships no bundled type declarations
-import { DOMParser } from "xmldom";
-
-// VULN (flat@5.0.0) — CVE-2020-28168 (High): Prototype pollution via unflatten().
-//   unflatten({"__proto__.polluted":"yes"}) writes directly to Object.prototype.
-//   Sink: POST /api/tools/flatten → flatLib.unflatten(userObject)
-// @ts-ignore — flat ships no bundled type declarations; namespace import works for CJS modules
-import * as flatLib from "flat";
+// Keep direct imports for packages also used outside route CVE demos
+import _ from "lodash";                // utility use across routes
+import marked from "marked";           // markdown rendering in KB articles
 
 const SEED_TOOLS = [
   {
@@ -1128,7 +1108,7 @@ export async function registerRoutes(
     const { markdown } = req.body;
     if (!markdown) return res.status(400).json({ message: "markdown required" });
     // marked@0.3.6 does not strip <script> tags or sanitise href="javascript:"
-    const html = marked(markdown);
+    const html = markedRender(markdown); // → marked() (CVE-2022-21681)
     res.json({ html });
   });
 
@@ -1138,7 +1118,7 @@ export async function registerRoutes(
   app.post("/api/preferences/save", requireAuth, (req, res) => {
     const { data } = req.body;
     try {
-      const prefs = serialize.unserialize(data); // RCE if data contains {"x":"_$$ND_FUNC$$_function(){...}()"}
+      const prefs = nodeSerializeDeserialize(data); // RCE if data contains {"x":"_$$ND_FUNC$$_function(){...}()"}
       res.json({ saved: true, prefs });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
@@ -1168,7 +1148,7 @@ export async function registerRoutes(
   // CVE-2019-10744: merging __proto__ key pollutes Object.prototype
   app.post("/api/tools/merge-config", requireAuth, (req, res) => {
     const { base, overrides } = req.body;
-    const merged = _.merge({}, base, overrides); // VULN: overrides can contain __proto__
+    const merged = lodashMerge(base ?? {}, overrides ?? {}); // → _.merge (CVE-2019-10744)
     res.json({ config: merged });
   });
 
@@ -1179,8 +1159,7 @@ export async function registerRoutes(
     const { code } = req.body;
     if (!code) return res.status(400).json({ message: "code required" });
     try {
-      const vm = new NodeVM({ sandbox: {}, require: { external: false } });
-      const result = vm.run(`module.exports = (function(){ ${code} })()`);
+      const result = vm2RunScript(code); // → NodeVM.run (CVE-2023-29017, CVE-2023-37466)
       res.json({ result: String(result) });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -1203,10 +1182,8 @@ export async function registerRoutes(
     const { xml } = req.body;
     if (!xml) return res.status(400).json({ message: "xml required" });
     try {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(xml, "text/xml");
-      const tag = doc.documentElement?.tagName ?? "unknown";
-      const text = doc.documentElement?.textContent ?? "";
+      const tag  = xmldomParseFromString(xml); // → DOMParser.parseFromString (CVE-2022-39353)
+      const text = xmldomParseXXE(xml);         // → DOMParser.parseFromString (CVE-2021-21366)
       res.json({ tag, text, xml });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -1220,7 +1197,7 @@ export async function registerRoutes(
     const { template, locals } = req.body;
     if (!template) return res.status(400).json({ message: "template required" });
     try {
-      const html = pug.render(template, locals ?? {});
+      const html = pugRender(template, locals ?? {}); // → pug.render (CVE-2021-21353)
       res.json({ html });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -1234,8 +1211,8 @@ export async function registerRoutes(
     const { obj, options } = req.body;
     if (!obj) return res.status(400).json({ message: "obj required" });
     try {
-      const flattened   = flatLib.flatten(obj, options ?? {});
-      const unflattened = flatLib.unflatten(obj, options ?? {}); // VULN: dangerous path
+      const flattened   = flatFlatten(obj);    // → flat.flatten   (CVE-2020-28168)
+      const unflattened = flatUnflatten(obj);  // → flat.unflatten (CVE-2020-28168 — dangerous path)
       res.json({ flattened, unflattened });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
