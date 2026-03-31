@@ -27,10 +27,22 @@ import marked from "marked";           // marked@0.3.6  — XSS via unsanitised 
 import _ from "lodash";                // lodash@4.17.15 — prototype pollution (CVE-2019-10744)
 // @ts-ignore — no type declarations for node-serialize@0.0.4
 import serialize from "node-serialize"; // node-serialize@0.0.4 — RCE via IIFE (CVE-2017-5941)
-// Loaded via _require so they land in require.cache and appear in /api/admin/modules
-// VULN: each package exposes a distinct CVE-class attack surface (see routes below)
-const { NodeVM }   = _require("vm2");         // vm2 — sandbox escape  (CVE-2023-29017, CVE-2023-37466)
-const pug: any     = _require("pug");         // pug  — SSTI / RCE     (CVE-2021-21353)
+// Direct imports so static reachability analysis can trace the call graph from each
+// HTTP route down to the vulnerable sink inside the package.
+// Using _require() wrappers was hiding these from scanner call-graph analysis.
+//
+// VULN (vm2@3.10.5) — CVE-2023-29017 / CVE-2023-37466 (Critical): Sandbox escape.
+//   NodeVM.run() can be escaped by crafting a payload that breaks out of the V8 sandbox.
+//   Sink: POST /api/tools/run-script → NodeVM.run(userCode)
+// @ts-ignore — vm2 types may not match this import style
+import { NodeVM } from "vm2";
+
+// VULN (pug@2.0.4) — CVE-2021-21353 (Critical): Server-Side Template Injection → RCE.
+//   pug.render() with an attacker-controlled template string executes arbitrary Node.js.
+//   Payload: "-var x=require('child_process').execSync('id').toString()\n= x"
+//   Sink: POST /api/tools/render-template → pug.render(userTemplate)
+// @ts-ignore — pug types conflict
+import pug from "pug";
 
 // xmldom loaded as a direct import (not via _require wrapper) so static reachability
 // analysis can trace the call graph from the HTTP route down into the vulnerable
@@ -48,7 +60,12 @@ const pug: any     = _require("pug");         // pug  — SSTI / RCE     (CVE-20
 // Both sinks are reached through POST /api/tools/parse-xml → DOMParser.parseFromString().
 // @ts-ignore — xmldom@0.6.0 ships no bundled type declarations
 import { DOMParser } from "xmldom";
-const flatLib: any = _require("flat");        // flat — proto pollution (CVE-2020-28168)
+
+// VULN (flat@5.0.0) — CVE-2020-28168 (High): Prototype pollution via unflatten().
+//   unflatten({"__proto__.polluted":"yes"}) writes directly to Object.prototype.
+//   Sink: POST /api/tools/flatten → flatLib.unflatten(userObject)
+// @ts-ignore — flat ships no bundled type declarations; namespace import works for CJS modules
+import * as flatLib from "flat";
 
 const SEED_TOOLS = [
   {
