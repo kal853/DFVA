@@ -1015,13 +1015,18 @@ export async function registerRoutes(
     }
   });
 
-  // 5. eval() Deserialization — RCE via direct eval()
-  // Requires auth. No additional validation — any JS expression in `data` executes.
+  // 5. Safe JSON deserialization — parse JSON instead of executing code
   app.post(api.tools.deserialize.path, requireAuth, (req, res) => {
     const { data } = req.body;
-    if (!data) return res.status(400).json({ message: "data required" });
-    try { res.json({ result: eval("(" + data + ")") }); }
-    catch (e: any) { res.status(500).json({ message: "Eval Error: " + e.message }); }
+    if (typeof data !== "string" || !data) {
+      return res.status(400).json({ message: "data required" });
+    }
+
+    try {
+      res.json({ result: JSON.parse(data) });
+    } catch {
+      res.status(400).json({ message: "Invalid JSON data" });
+    }
   });
 
   // 6. Broken Auth — header bypass
