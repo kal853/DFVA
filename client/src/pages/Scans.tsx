@@ -5,6 +5,7 @@ import {
   AlertCircle, Play, Calendar, Globe, ChevronDown, ChevronUp, Lock, Download
 } from "lucide-react";
 import { useSession } from "@/lib/session";
+import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { ScanJob } from "@shared/schema";
 
@@ -64,7 +65,7 @@ function JobRow({ job, onDelete, onPatch }: {
 
         <StatusBadge status={job.status} />
 
-        {/* VULN: PATCH schedule after creation — plan gate not re-checked */}
+        {/* Offer a schedule upgrade for pending or scheduled one-time jobs. */}
         {(job.status === "pending" || job.status === "scheduled") && job.schedule === "one-time" && (
           <button
             data-testid={`button-upgrade-schedule-${job.id}`}
@@ -110,7 +111,7 @@ function JobRow({ job, onDelete, onPatch }: {
           </a>
         )}
 
-        {/* VULN: delete sends job.id — no ownership check server-side */}
+        {/* Allow owners to cancel a job. */}
         <button
           data-testid={`button-cancel-job-${job.id}`}
           onClick={() => onDelete(job.id)}
@@ -162,22 +163,19 @@ export default function Scans() {
 
   const { data: jobs = [], isLoading } = useQuery<ScanJob[]>({
     queryKey: ["/api/scans", userId],
-    queryFn: () => fetch(`/api/scans?userId=${userId}`).then(r => r.json()),
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/scans");
+      return res.json();
+    },
     enabled: !!userId,
     refetchInterval: 8000,
   });
 
   const createMutation = useMutation({
-    mutationFn: (body: object) =>
-      fetch("/api/scans", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }).then(async r => {
-        const d = await r.json();
-        if (!r.ok) throw new Error(d.message);
-        return d;
-      }),
+    mutationFn: async (body: { targetUrl: string; toolSlug: string; schedule: string }) => {
+      const res = await apiRequest("POST", "/api/scans", body);
+      return res.json();
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/scans", userId] });
       setUrl("");
@@ -187,30 +185,30 @@ export default function Scans() {
   });
 
   const patchMutation = useMutation({
-    mutationFn: ({ id, schedule }: { id: number; schedule: string }) =>
-      // VULN: sends raw job.id with no ownership token — server performs no ownership check
-      fetch(`/api/scans/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schedule }),
-      }).then(r => r.json()),
+    mutationFn: async ({ id, schedule }: { id: number; schedule: string }) => {
+      const res = await apiRequest("PATCH", `/api/scans/${id}`, { schedule });
+      return res.json();
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/scans", userId] }),
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: number) =>
-      // VULN: sends raw job.id — server deletes without checking ownership
-      fetch(`/api/scans/${id}`, { method: "DELETE" }).then(r => r.json()),
+    mutationFn: async (id: number) => {
+      const res = await apiRequest("DELETE", `/api/scans/${id}`);
+      return res.json();
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/scans", userId] });
       toast({ title: "Job cancelled" });
     },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
   function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (!url.trim()) return;
-    createMutation.mutate({ userId, targetUrl: url, toolSlug: tool, schedule });
+    createMutation.mutate({ targetUrl: url, toolSlug: tool, schedule });
   }
 
   return (
