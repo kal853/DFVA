@@ -24,8 +24,6 @@ import pug from "pug";
 import * as flat from "flat";
 import marked from "marked";
 import _ from "lodash";
-// @ts-ignore
-import serialize from "node-serialize";
 
 // ── xmldom@0.6.0 ─────────────────────────────────────────────────────────────
 // CVE-2022-39353 / GHSA-crh6-fp67-6883 (Critical)
@@ -93,13 +91,12 @@ export function lodashMerge(target: object, source: object): object {
   return _.merge(target, source);
 }
 
-// ── node-serialize@0.0.4 ─────────────────────────────────────────────────────
-// CVE-2017-5941 / no GHSA (Critical)
-// Vulnerable sink: serialize.unserialize
-// RCE via IIFE in serialised string: {"x":"_$$ND_FUNC$$_function(){...}()"}
-// eval()-equivalent executes attacker-controlled code during deserialisation.
+// ── Legacy preferences parsing ───────────────────────────────────────────────
+// The preferences route previously used node-serialize@0.0.4 here, which could
+// execute attacker-controlled code during deserialisation. Restrict parsing to
+// strict JSON text so function markers are treated as plain strings or rejected.
 export function nodeSerializeDeserialize(payload: string): unknown {
-  return serialize.unserialize(payload);
+  return JSON.parse(payload);
 }
 
 // ── Sink registry ─────────────────────────────────────────────────────────────
