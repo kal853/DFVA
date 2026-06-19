@@ -10,6 +10,7 @@ import fs from "fs";
 import path from "path";
 import { signToken, requireAuth } from "./auth";
 import axios from "axios";
+import { validateScanTargetUrl } from "./scanTargetValidation";
 import multer from "multer";
 import { createRequire } from "module";
 // import.meta.url is undefined in the CJS production bundle (esbuild format:"cjs").
@@ -1445,7 +1446,7 @@ export async function registerRoutes(
 
   // POST /api/scans
   // Authenticated users can only create jobs for themselves.
-  // Target validation is handled separately from ownership enforcement here.
+  // Scan targets are limited to resolvable public HTTP(S) hosts.
   app.post("/api/scans", requireAuth, async (req: any, res) => {
     try {
       const callerId: number = req.sentinelUser?.userId;
@@ -1456,6 +1457,13 @@ export async function registerRoutes(
 
       if (userId !== undefined && parseInt(userId) !== callerId) {
         return res.status(403).json({ message: "Cannot create scan jobs for another user" });
+      }
+
+      let validatedTargetUrl: URL;
+      try {
+        validatedTargetUrl = await validateScanTargetUrl(targetUrl);
+      } catch (e: any) {
+        return res.status(400).json({ message: e.message });
       }
 
       const user = await storage.getUser(callerId);
@@ -1475,7 +1483,7 @@ export async function registerRoutes(
 
       const job = await storage.createScanJob({
         userId: callerId,
-        targetUrl,
+        targetUrl: validatedTargetUrl.toString(),
         toolSlug,
         schedule: chosenSchedule,
         nextRunAt: new Date(),

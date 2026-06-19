@@ -1,14 +1,37 @@
 // SENTINEL Scan Job Worker
-// Deliberately vulnerable — see inline VULN comments.
 // Runs as an in-process setInterval loop; production systems would use a proper queue.
 
 import axios from "axios";
 import { storage } from "./storage";
+import { validateScanTargetUrl } from "./scanTargetValidation";
 
 const SCHEDULE_INTERVALS: Record<string, number> = {
   daily:  24 * 60 * 60 * 1000,
   weekly: 7  * 24 * 60 * 60 * 1000,
 };
+
+async function fetchValidatedScanTarget(targetUrl: string, redirectsRemaining = 5) {
+  const validatedUrl = await validateScanTargetUrl(targetUrl);
+  const response = await axios.get(validatedUrl.toString(), {
+    timeout: 8000,
+    maxRedirects: 0,
+    validateStatus: () => true,
+    responseType: "text",
+  });
+
+  const locationHeader = response.headers.location;
+  const location = Array.isArray(locationHeader) ? locationHeader[0] : locationHeader;
+  if (location && response.status >= 300 && response.status < 400) {
+    if (redirectsRemaining <= 0) {
+      throw new Error("Too many redirects.");
+    }
+
+    const redirectedUrl = new URL(location, validatedUrl).toString();
+    return fetchValidatedScanTarget(redirectedUrl, redirectsRemaining - 1);
+  }
+
+  return response;
+}
 
 // ── Worker tick ───────────────────────────────────────────────────────────────
 async function runDueJobs(): Promise<void> {
@@ -23,24 +46,12 @@ async function runDueJobs(): Promise<void> {
     await storage.updateScanJob(job.id, { status: "running" });
 
     try {
-      // VULN (Stored SSRF): targetUrl is fetched verbatim — no validation, no
-      // block-list, no DNS rebinding protection. A job stored with
-      // targetUrl="http://169.254.169.254/latest/meta-data/" will request AWS
-      // instance metadata (or any other internal endpoint) when the worker ticks.
-      // The raw response (truncated to 2 KB) is persisted in lastResult.
-      const response = await axios.get(job.targetUrl, {
-        timeout: 8000,
-        maxRedirects: 5,
-        validateStatus: () => true,           // accept any HTTP status
-        responseType: "text",
-      });
+      const response = await fetchValidatedScanTarget(job.targetUrl);
 
       const snippet = typeof response.data === "string"
         ? response.data.slice(0, 2000)
         : JSON.stringify(response.data).slice(0, 2000);
 
-      // VULN: raw server response (may contain internal metadata) stored in DB
-      //       and returned to any caller of GET /api/scans/:id
       const result = JSON.stringify({
         status:  response.status,
         headers: Object.fromEntries(
