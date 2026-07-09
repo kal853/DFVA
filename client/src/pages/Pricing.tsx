@@ -76,7 +76,15 @@ const DOWNGRADE_LOSS: Record<string, string[]> = {
 };
 
 async function apiFetch(url: string, body: object) {
-  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const token = localStorage.getItem("sentinel_token");
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
   const data = await res.json();
   if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
   return data;
@@ -123,7 +131,7 @@ export default function Pricing() {
   });
 
   const topup = useMutation({
-    mutationFn: () => apiFetch("/api/billing/topup", { userId: user.id, amount: parseFloat(topupAmount) }),
+    mutationFn: () => apiFetch("/api/wallet/topup", { userId: user.id, amount: parseFloat(topupAmount) }),
     onSuccess: async (d) => {
       toast({ title: "Credits added", description: `Balance: $${d.walletBalance}` });
       await refreshUser();

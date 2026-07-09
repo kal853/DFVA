@@ -318,9 +318,28 @@ export async function registerRoutes(
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
-  app.post(api.billing.topup.path, async (req, res) => {
+  app.post(api.billing.topup.path, requireAuth, async (req, res) => {
     try {
-      const { userId, amount } = req.body;
+      const userId = Number(req.body.userId);
+      const amount = Number(req.body.amount);
+
+      if (!Number.isInteger(userId) || !Number.isFinite(amount)) {
+        return res.status(400).json({ message: "userId and amount are required" });
+      }
+
+      if (amount <= 0) {
+        return res.status(400).json({ message: "Top-up amount must be greater than 0" });
+      }
+
+      const requester = await storage.getUser(req.sentinelUser.userId);
+      if (!requester) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      if (requester.id !== userId && requester.role !== "admin") {
+        return res.status(403).json({ message: "Unauthorized" });
+      }
+
       const user = await storage.topupWallet(userId, amount);
       await storage.logWalletTransaction(userId, amount, "topup", "Credit top-up");
       res.json({ message: `Topped up $${amount}`, walletBalance: user.walletBalance });

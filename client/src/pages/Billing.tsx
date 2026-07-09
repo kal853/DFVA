@@ -110,9 +110,13 @@ export default function Billing() {
 
   const topup = useMutation({
     mutationFn: async () => {
+      const token = localStorage.getItem("sentinel_token");
       const res = await fetch(api.billing.topup.path, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ userId, amount: parseFloat(topupAmount) }),
       });
       return handleResponse(res);
