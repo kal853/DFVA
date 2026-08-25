@@ -302,10 +302,16 @@ export async function registerRoutes(
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
-  app.post(api.billing.downgrade.path, async (req, res) => {
+  app.post(api.billing.downgrade.path, requireAuth, async (req: any, res) => {
     try {
       const { userId, targetPlan } = req.body;
-      const result = await processDowngrade(userId, targetPlan as PlanKey);
+      const callerUserId = req.sentinelUser?.userId;
+      // Enforce ownership: a caller may only downgrade their own subscription.
+      // Reject any request that targets a userId other than the authenticated caller.
+      if (userId !== undefined && userId !== null && Number(userId) !== Number(callerUserId)) {
+        return res.status(403).json({ message: "Forbidden — you may only modify your own subscription" });
+      }
+      const result = await processDowngrade(callerUserId, targetPlan as PlanKey);
       res.json({ message: `Downgraded to ${targetPlan}`, refundAmount: result.refundAmount, walletBalance: result.newBalance });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
