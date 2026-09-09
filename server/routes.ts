@@ -1594,12 +1594,6 @@ export async function registerRoutes(
       res.json(members);
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
-    try {
-      const members = await storage.getWorkspaceMembers(parseInt(req.params.id));
-      res.json(members);
-    } catch (e: any) { res.status(500).json({ message: e.message }); }
-  });
-
   // VULN #48 (POST /api/workspaces/:id/invite):
   //   - Token generated with Math.random().toString(36) — same weakness as #13.
   //   - Intended role written to DB but POST /api/invitations/:token/accept reads ?role= from URL.
@@ -1750,9 +1744,6 @@ export async function registerRoutes(
       if (req.sentinelUser?.role !== "admin") {
         return res.status(403).json({ message: "Forbidden: admin role required" });
       }
-      const { title, slug, body, category, tags } = req.body;
-      if (!title || !slug || !body) {
-    try {
       const { title, slug, body, category, tags } = req.body;
       if (!title || !slug || !body) {
         return res.status(400).json({ message: "title, slug, and body are required" });
