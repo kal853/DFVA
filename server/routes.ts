@@ -294,10 +294,13 @@ export async function registerRoutes(
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
-  app.post(api.billing.upgrade.path, async (req, res) => {
+  app.post(api.billing.upgrade.path, requireAuth, async (req: any, res) => {
     try {
+      const callerId: number = req.sentinelUser.userId;
       const { userId, targetPlan, paymentMethod } = req.body;
-      const result = await finalizeUpgrade(userId, targetPlan as PlanKey, paymentMethod);
+      if (userId !== callerId) return res.status(403).json({ message: "Forbidden" });
+
+      const result = await finalizeUpgrade(callerId, targetPlan as PlanKey, paymentMethod);
       res.json({ message: `Upgraded to ${targetPlan}`, plan: result.plan, walletBalance: result.newBalance });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
