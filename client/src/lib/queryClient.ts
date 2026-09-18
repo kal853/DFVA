@@ -7,7 +7,7 @@ async function throwIfResNotOk(res: Response) {
   }
 }
 
-function authHeaders(): Record<string, string> {
+export function authHeaders(): Record<string, string> {
   const token = localStorage.getItem("sentinel_token");
   return token ? { Authorization: `Bearer ${token}` } : {};
 }

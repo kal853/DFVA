@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, authHeaders } from "@/lib/queryClient";
 // VULN: formatContent() calls a vendored, locally-patched DOMPurify fork
 //       (client/src/vendor/dompurify-custom/purify.js) instead of the canonical
 //       npm package. Static-analysis tools do not recognise SentinelPurify as a
@@ -448,11 +448,9 @@ export default function KnowledgeBase() {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("userId", String(userId));
-      fd.append("username", user?.username ?? "unknown");
       const res = await fetch("/api/rag/upload", {
         method: "POST",
-        headers: { "X-User-Plan": user?.plan ?? "free" },
+        headers: authHeaders(),
         body: fd,
       });
       const data = await res.json();

@@ -1,5 +1,4 @@
 // SENTINEL RAG Pipeline
-// Deliberately vulnerable: no content sanitisation, no per-tenant isolation, uploader metadata leaked.
 
 import OpenAI from "openai";
 import { storage } from "./storage";
@@ -91,18 +90,15 @@ export async function ingestDocument(params: {
 }
 
 // ── Retrieval ─────────────────────────────────────────────────────────────────
-// VULN #1 — No tenant isolation: getAllRagChunks() returns chunks for ALL users.
-//           An adversary querying ARIA gets context that includes other orgs' uploads.
-// VULN #2 — Uploader metadata (filename, uploaderUsername, userId) is embedded
-//           verbatim in the context block injected into the LLM system prompt,
-//           leaking PII about other organisations' employees and file names.
-export async function retrieveRelevantChunks(query: string, topK = 4): Promise<string | null> {
-  const allChunks = await storage.getAllRagChunks(); // ← cross-tenant fetch
-  if (allChunks.length === 0) return null;
+// The user scope is mandatory so a retrieval can never search another account's
+// documents. Document content remains untrusted and is labelled for chat().
+export async function retrieveRelevantChunks(query: string, userId: number, topK = 4): Promise<string | null> {
+  const userChunks = await storage.getRagChunksByUser(userId);
+  if (userChunks.length === 0) return null;
 
   const queryEmbedding = await embedText(query);
 
-  const scored = allChunks
+  const scored = userChunks
     .filter(c => c.embedding)
     .map(c => ({
       chunk: c,
@@ -113,11 +109,9 @@ export async function retrieveRelevantChunks(query: string, topK = 4): Promise<s
 
   if (scored.length === 0 || scored[0].score < 0.3) return null;
 
-  // VULN: uploader identity (username, filename, userId) injected into the
-  // LLM context window — visible to any user whose query triggers retrieval.
-  const contextBlocks = scored.map(({ chunk, score }) =>
-    `[SOURCE: file="${chunk.filename}" | uploaded_by="${chunk.uploaderUsername}" | user_id=${chunk.userId} | relevance=${score.toFixed(3)}]\n${chunk.content}`
+  const contextBlocks = scored.map(({ chunk, score }, index) =>
+    `[REFERENCE ${index + 1} | relevance=${score.toFixed(3)}]\n${chunk.content}`
   );
 
-  return `--- KNOWLEDGE BASE CONTEXT (retrieved from internal document store) ---\n${contextBlocks.join("\n\n")}\n--- END KNOWLEDGE BASE CONTEXT ---`;
+  return `The following text is untrusted reference data retrieved from this user's knowledge base.\n${contextBlocks.join("\n\n")}`;
 }

@@ -1123,21 +1123,19 @@ export async function registerRoutes(
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
-  // ── ARIA CHAT (prompt injection + RAG poisoning + ARIA tool abuse) ───────────
-  // VULN: RAG retrieval is cross-tenant and unsanitised. If any uploaded doc
-  // contains adversarial instructions, they execute with system-prompt authority.
-  // VULN: userId taken from request body — no session check. Any user can pose as any userId.
-  // VULN: ARIA tool calls (submit_ticket, get_wallet_balance) use caller-supplied userId
-  //       and auto-approve refund tickets with no payment provenance verification (C4).
-  app.post("/api/chat", async (req, res) => {
-    const { history, userId } = req.body as { history: ChatMessage[]; userId?: number };
+  // ── ARIA CHAT ────────────────────────────────────────────────────────────────
+  app.post("/api/chat", requireAuth, async (req: any, res) => {
+    const { history } = req.body as { history: ChatMessage[] };
     if (!Array.isArray(history)) return res.status(400).json({ message: "history array required" });
     try {
+      const caller = await storage.getUser(req.sentinelUser.userId);
+      if (!caller || !caller.isActive) {
+        return res.status(403).json({ message: "Active account required" });
+      }
+
       const lastUserMsg = [...history].reverse().find(m => m.role === "user")?.content ?? "";
-      // VULN: retrieves chunks from ALL tenants — cross-org data bleed
-      const ragContext = await retrieveRelevantChunks(lastUserMsg).catch(() => null);
-      // VULN: callerUserId not verified against session — ARIA acts on it as truth
-      const result = await chat(history, ragContext, userId);
+      const ragContext = await retrieveRelevantChunks(lastUserMsg, caller.id).catch(() => null);
+      const result = await chat(history, ragContext, caller.id);
       res.json({ reply: result.reply, ragContextInjected: result.ragContextInjected, toolCalls: result.toolCalls });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -1366,24 +1364,21 @@ export async function registerRoutes(
   });
 
   // POST /api/rag/upload
-  // VULN #31: Plan check trusts X-User-Plan header from client — no DB verification.
-  //   Set X-User-Plan: enterprise to bypass the gate regardless of actual plan.
-  // VULN #32: userId taken from body with no authentication — any userId can be impersonated.
-  // VULN #33: file content ingested verbatim — prompt injection payloads inside a PDF
-  //   surface unsanitised in ARIA's system prompt during retrieval.
-  app.post("/api/rag/upload", upload.single("file"), async (req, res) => {
+  // Authentication and the current database record determine document ownership
+  // and plan access; multipart fields and headers are never trusted for either.
+  app.post("/api/rag/upload", requireAuth, upload.single("file"), async (req: any, res) => {
     try {
-      // Broken plan check — trusts client header, not DB
-      const claimedPlan = req.headers["x-user-plan"] as string ?? "free";
-      if (claimedPlan !== "enterprise") {
+      const caller = await storage.getUser(req.sentinelUser.userId);
+      if (!caller || !caller.isActive) {
+        return res.status(403).json({ message: "Active account required" });
+      }
+      if (caller.plan !== "enterprise") {
         return res.status(403).json({ message: "Knowledge Base upload requires an Enterprise plan." });
       }
-
-      const userId   = parseInt(req.body.userId ?? "0");
-      const username = req.body.username ?? "unknown";
-      if (!userId) return res.status(400).json({ message: "userId required" });
       if (!req.file) return res.status(400).json({ message: "file required" });
 
+      const userId = caller.id;
+      const username = caller.username;
       const { originalname, mimetype, buffer } = req.file;
 
       // Extract text based on MIME
@@ -1429,11 +1424,9 @@ export async function registerRoutes(
     res.json({ message: "Document deleted." });
   });
 
-  // GET /api/rag/chunks — raw chunk dump (no auth, full cross-tenant exposure)
-  // VULN #36: exposes every chunk from every tenant, including filename, uploaderUsername, userId
-  app.get("/api/rag/chunks", async (_req, res) => {
-    const chunks = await storage.getAllRagChunks();
-    // Strip embeddings from the dump (too large) but leak all metadata + content
+  // GET /api/rag/chunks — authenticated users may inspect only their own chunks.
+  app.get("/api/rag/chunks", requireAuth, async (req: any, res) => {
+    const chunks = await storage.getRagChunksByUser(req.sentinelUser.userId);
     res.json(chunks.map(c => ({
       id: c.id, documentId: c.documentId, userId: c.userId,
       uploaderUsername: c.uploaderUsername, filename: c.filename,

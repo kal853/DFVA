@@ -40,9 +40,8 @@ export interface IStorage {
   getRagDocumentsByUser(userId: number): Promise<RagDocument[]>;
   getRagDocument(id: number): Promise<RagDocument | undefined>;
   deleteRagDocument(id: number): Promise<void>;
-  // VULN: no tenant filter param — all implementations fetch ALL chunks across all users
   createRagChunk(data: { documentId: number; userId: number; uploaderUsername: string; filename: string; content: string; embedding: string; chunkIndex: number }): Promise<RagChunk>;
-  getAllRagChunks(): Promise<RagChunk[]>;
+  getRagChunksByUser(userId: number): Promise<RagChunk[]>;
   deleteRagChunksByDocument(documentId: number): Promise<void>;
   // Scan Jobs
   createScanJob(data: { userId: number; targetUrl: string; toolSlug: string; schedule: string; nextRunAt: Date }): Promise<ScanJob>;
@@ -248,9 +247,8 @@ export class DatabaseStorage implements IStorage {
     return chunk;
   }
 
-  // VULN: fetches ALL chunks — no WHERE userId = ? — cross-tenant data exposure
-  async getAllRagChunks(): Promise<RagChunk[]> {
-    return await db.select().from(ragChunks);
+  async getRagChunksByUser(userId: number): Promise<RagChunk[]> {
+    return await db.select().from(ragChunks).where(eq(ragChunks.userId, userId));
   }
 
   async deleteRagChunksByDocument(documentId: number): Promise<void> {

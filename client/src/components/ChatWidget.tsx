@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { MessageSquare, X, Send, Loader2, Shield, ChevronDown, Zap } from "lucide-react";
-import { useSession } from "@/lib/session";
+import { authHeaders } from "@/lib/queryClient";
 
 type Message = { role: "user" | "assistant"; content: string };
 type ToolCall = { name: string; args: Record<string, unknown>; result: unknown };
@@ -34,7 +34,6 @@ function MessageBubble({ msg }: { msg: Message }) {
 }
 
 export default function ChatWidget() {
-  const { user } = useSession();
   const [open, setOpen] = useState(false);
   const [minimized, setMinimized] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
@@ -70,11 +69,10 @@ export default function ChatWidget() {
     setError(null);
 
     try {
-      // VULN: userId sent in body with no session token — anyone can spoof any userId
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ history: newHistory, userId: user?.id }),
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ history: newHistory }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Request failed");
