@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 import { CreditCard, Zap, ArrowUp, ArrowDown, Wallet, ChevronRight, Loader2 } from "lucide-react";
 import { api } from "@shared/routes";
 import { PLANS } from "@shared/schema";
+import { apiRequest } from "@/lib/queryClient";
 
 const PLAN_ORDER = ["free", "pro", "enterprise"] as const;
 
@@ -94,10 +95,9 @@ export default function Billing() {
 
   const applyCredits = useMutation({
     mutationFn: async () => {
-      const res = await fetch(api.billing.applyCredits.path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, orderAmount: parseFloat(orderAmount) }),
+      const res = await apiRequest("POST", api.billing.applyCredits.path, {
+        userId,
+        orderAmount: parseFloat(orderAmount),
       });
       return handleResponse(res);
     },

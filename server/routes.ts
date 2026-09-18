@@ -310,10 +310,14 @@ export async function registerRoutes(
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
-  app.post(api.billing.applyCredits.path, async (req, res) => {
+  app.post(api.billing.applyCredits.path, requireAuth, async (req: any, res) => {
     try {
+      const callerId: number = req.sentinelUser.userId;
       const { userId, orderAmount } = req.body;
-      const result = await applyCreditsToOrder(userId, orderAmount);
+      if (userId !== undefined && Number(userId) !== callerId) {
+        return res.status(403).json({ message: "Cannot apply credits for another user" });
+      }
+      const result = await applyCreditsToOrder(callerId, orderAmount);
       res.json({ message: "Credits applied", finalAmount: result.finalAmount, creditsUsed: result.creditsUsed });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
