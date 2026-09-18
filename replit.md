@@ -411,7 +411,7 @@ W │
 ## Seed Users
 | Username | Password | Plan | Wallet |
 |----------|----------|------|--------|
-| admin | super_secret_password_123 | enterprise | $0 |
+| admin | `ADMIN_BOOTSTRAP_PASSWORD` (deployment-provided) | enterprise | $0 |
 | jdoe | password1 | pro | $50 |
 | asmith | password1 | free | $0 |
 

@@ -9,6 +9,7 @@ import { exec } from "child_process";
 import fs from "fs";
 import path from "path";
 import { signToken, requireAuth } from "./auth";
+import { createLockedPasswordHash, hashPassword, isPasswordHash, verifyPassword } from "./password";
 import axios from "axios";
 import multer from "multer";
 import { createRequire } from "module";
@@ -198,14 +199,42 @@ export async function registerRoutes(
   // ── Seed on startup ──────────────────────────────────────────────────────────
   setTimeout(async () => {
     try {
-      const adminUser = await storage.getUserByUsername("admin");
-      if (!adminUser) {
-        await storage.createUser({ username: "admin", password: "super_secret_password_123", fullName: "Kalyan Ramkumar", role: "admin", email: "admin@sentinel.io", plan: "enterprise", walletBalance: "0.00" });
-        const jdoe = await storage.createUser({ username: "jdoe", password: "password1", fullName: "James Doe", role: "user", email: "jdoe@corp.internal", plan: "free", walletBalance: "0.00" });
-        const asmith = await storage.createUser({ username: "asmith", password: "password1", fullName: "Alice Smith", role: "user", email: "asmith@corp.internal", plan: "free", walletBalance: "0.00" });
+      const configuredBootstrapPassword = process.env.ADMIN_BOOTSTRAP_PASSWORD;
+      delete process.env.ADMIN_BOOTSTRAP_PASSWORD;
+      const bootstrapPassword = configuredBootstrapPassword && configuredBootstrapPassword.length >= 16
+        ? configuredBootstrapPassword
+        : undefined;
+      if (configuredBootstrapPassword && !bootstrapPassword) {
+        console.error("ADMIN_BOOTSTRAP_PASSWORD must contain at least 16 characters; administrator provisioning skipped.");
+      }
+
+      let adminUser = await storage.getUserByUsername("admin");
+      if (!adminUser && bootstrapPassword) {
+        adminUser = await storage.createUser({ username: "admin", password: await hashPassword(bootstrapPassword), fullName: "Kalyan Ramkumar", role: "admin", email: "admin@sentinel.io", plan: "enterprise", walletBalance: "0.00" });
+        const jdoe = await storage.createUser({ username: "jdoe", password: await hashPassword("password1"), fullName: "James Doe", role: "user", email: "jdoe@corp.internal", plan: "free", walletBalance: "0.00" });
+        const asmith = await storage.createUser({ username: "asmith", password: await hashPassword("password1"), fullName: "Alice Smith", role: "user", email: "asmith@corp.internal", plan: "free", walletBalance: "0.00" });
         await storage.createInvoice({ userId: jdoe.id, amount: "0.00", status: "paid" });
         await storage.createInvoice({ userId: asmith.id, amount: "0.00", status: "paid" });
-      } else if (!adminUser.fullName) {
+      } else if (!adminUser) {
+        console.warn("Administrator not provisioned: set a unique ADMIN_BOOTSTRAP_PASSWORD of at least 16 characters.");
+      }
+
+      // Migrate legacy plaintext users. Privileged accounts are reset from the
+      // deployment secret or locked with an unknown random password.
+      for (const user of await storage.getAllUsers()) {
+        if (isPasswordHash(user.password)) continue;
+        if (user.role === "admin") {
+          const passwordHash = user.username === "admin" && bootstrapPassword
+            ? await hashPassword(bootstrapPassword)
+            : await createLockedPasswordHash();
+          await storage.setPassword(user.id, passwordHash);
+          if (!bootstrapPassword) console.warn(`Locked legacy plaintext administrator account: ${user.username}`);
+        } else {
+          await storage.setPassword(user.id, await hashPassword(user.password));
+        }
+      }
+
+      if (adminUser && !adminUser.fullName) {
         // Backfill fullName for existing users after schema migration
         await storage.setFullName(adminUser.id, "Kalyan Ramkumar");
         const jdoe = await storage.getUserByUsername("jdoe");
@@ -474,26 +503,25 @@ export async function registerRoutes(
   });
 
   // ── AUTH ─────────────────────────────────────────────────────────────────────
-  // VULN: Plaintext password comparison (no hashing).
-  // VULN: User enumeration — distinct messages for "no such user" vs "wrong password".
   // VULN: No rate limiting — unlimited brute-force attempts permitted.
   app.post("/api/auth/login", async (req, res) => {
     try {
       const { username, password } = req.body;
-      if (!username || !password) return res.status(400).json({ message: "Username and password are required." });
+      if (typeof username !== "string" || typeof password !== "string" || !username || !password) {
+        return res.status(400).json({ message: "Username and password are required." });
+      }
 
       const user = await storage.getUserByUsername(username);
       const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0] ?? req.socket.remoteAddress ?? "unknown";
 
-      // VULN: Different messages reveal account existence
       if (!user) {
         logLogin({ userId: 0, username, fullName: null, plan: "unknown", ip, success: false, reason: "no_account" });
-        return res.status(401).json({ message: "No account found with that username." });
+        return res.status(401).json({ message: "Invalid credentials." });
       }
-      if (user.password !== password) {
+      if (!await verifyPassword(password, user.password)) {
         // VULN: Full name logged even on failed attempt — PII exposure
         logLogin({ userId: user.id, username, fullName: user.fullName, plan: user.plan, ip, success: false, reason: "wrong_password" });
-        return res.status(401).json({ message: "Incorrect password." });
+        return res.status(401).json({ message: "Invalid credentials." });
       }
 
       // VULN: Full name (PII) written to server logs on every successful login
@@ -609,14 +637,16 @@ export async function registerRoutes(
   app.post("/api/auth/register", async (req, res) => {
     try {
       const { username, password, email, fullName, referralCode } = req.body;
-      if (!username || !password) return res.status(400).json({ message: "username and password required" });
+      if (typeof username !== "string" || typeof password !== "string" || !username || !password) {
+        return res.status(400).json({ message: "username and password required" });
+      }
 
       const existing = await storage.getUserByUsername(username);
       if (existing) return res.status(409).json({ message: "Username already taken." });
 
       // Create account first
       const newUser = await storage.createUser({
-        username, password, email: email ?? null,
+        username, password: await hashPassword(password), email: email ?? null,
         fullName: fullName ?? null, role: "user", plan: "free", walletBalance: "0.00",
       });
 
