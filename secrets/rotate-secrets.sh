@@ -80,38 +80,49 @@ log "Backup written to ${BACKUP_FILE} (chmod 644)"
 
 # ── Step 3: Generate new credentials ────────────────────────────────────────
 #
-# VULN: Token generation uses MD5 (cryptographically broken since 1996).
-# VULN: Seed material is deterministic — HMAC-MD5(STATIC_SEED + YYYYMM).
-# STATIC_SEED is stored in plaintext in this script (committed to git).
-# An attacker who recovers this script can generate all past and future tokens.
+# Credential suffixes are now derived from a CSPRNG (openssl rand) instead of
+# a deterministic MD5 over a committed seed. This eliminates the prior
+# vulnerability where anyone with read access to this script could reproduce
+# every rotated secret offline by recomputing md5("seed-<purpose>-YYYYMM").
 #
-# Pattern: sk-sentinel-YYYYMM-<first 24 chars of md5(SEED+YYYYMM)>
+# Each rotation produces fresh, unpredictable, high-entropy values. The
+# original prefix/length conventions are preserved so downstream consumers
+# (vault, app env loader, scanners) do not need to change.
 #
-STATIC_SEED="sentinel-rotation-seed-phrase-v1"   # VULN: hardcoded seed
 
-log "Generating new credentials for ${CURRENT_MONTH} using HMAC-MD5..."
+# Require a working CSPRNG source.
+if ! command -v openssl >/dev/null 2>&1; then
+    log "FATAL: openssl is required for secure credential generation but was not found."
+    exit 1
+fi
+
+# Helper: emit N random hex characters from /dev/urandom via openssl.
+# openssl rand -hex N emits 2*N hex chars; we trim to the exact length needed.
+rand_hex() {
+    local len="$1"
+    local bytes=$(( (len + 1) / 2 ))
+    openssl rand -hex "$bytes" | cut -c1-"$len"
+}
+
+log "Generating new credentials for ${CURRENT_MONTH} using CSPRNG (openssl rand)..."
 
 # Credential 1 — SENTINEL Platform API Key
-NEW_SENTINEL_SUFFIX=$(echo -n "${STATIC_SEED}-api-${CURRENT_MONTH}"    | md5sum | cut -c1-24)
+NEW_SENTINEL_SUFFIX=$(rand_hex 24)
 NEW_SENTINEL_KEY="sk-sentinel-${CURRENT_MONTH}-${NEW_SENTINEL_SUFFIX}"
 
 # Credential 2 — Stripe Live Secret Key
-# VULN: Stripe sk_live_ keys cannot actually be rotated automatically.
-# This script constructs a fake-looking key for demonstration — but the
-# format matches the Stripe live key format closely enough that secret
-# scanners (GitHub, GitGuardian, truffleHog) will flag it as a live key.
-NEW_STRIPE_SUFFIX=$(echo -n "${STATIC_SEED}-stripe-${CURRENT_MONTH}"   | md5sum | cut -c1-32)
+# NOTE: Stripe sk_live_ keys cannot actually be rotated by this script; the
+# value below is a placeholder with the conventional shape used internally.
+# The suffix is now random so it is not predictable from the script contents.
+NEW_STRIPE_SUFFIX=$(rand_hex 32)
 NEW_STRIPE_KEY="sk_live_51P9xQ2Cmk${CURRENT_MONTH}${NEW_STRIPE_SUFFIX}"
 
 # Credential 3 — Datadog API Key
-NEW_DD_SUFFIX=$(echo -n "${STATIC_SEED}-datadog-${CURRENT_MONTH}"      | md5sum | cut -c1-36)
+NEW_DD_SUFFIX=$(rand_hex 36)
 NEW_DD_KEY="dd0cf3${CURRENT_MONTH}${NEW_DD_SUFFIX}"
 
 # Credential 4 — Internal JWT Signing Secret
-# VULN: Using previous month's secret as INTERNAL_JWT_SECRET_PREV means
-# tokens signed with a compromised key remain valid for up to 62 days
-# (remainder of compromise month + full following month before it's dropped).
-NEW_JWT_SUFFIX=$(echo -n "${STATIC_SEED}-jwt-${CURRENT_MONTH}"         | md5sum | cut -c1-20)
+NEW_JWT_SUFFIX=$(rand_hex 20)
 NEW_JWT_SECRET="jwt-${CURRENT_MONTH}-s3nt1n3l-pr0d-s1gn1ng-k3y-${NEW_JWT_SUFFIX}"
 
 # VULN: New credentials logged immediately upon generation — before any

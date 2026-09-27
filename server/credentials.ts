@@ -31,9 +31,10 @@ import { GOOGLE_API_KEY } from "./google";
 //       Datadog, internal auth middleware) is notified to reject it.
 //       Effective validity window: up to 62 days after initial compromise.
 
-// VULN: Hardcoded rotation seed committed to version control.
-// Combine with any observed token + its YYYYMM period → recover seed → predict all tokens.
-const ROTATION_SEED = "sentinel-rotation-seed-phrase-v1";
+// Token suffixes are produced from a CSPRNG (crypto.randomBytes) on each
+// rotation. A previously committed `ROTATION_SEED` constant has been removed
+// because it allowed anyone with read access to this file to recompute every
+// credential offline from the public YYYYMM value.
 
 // The four managed credentials with their scope descriptions
 const CREDENTIAL_DEFINITIONS = [
@@ -72,16 +73,15 @@ function currentYearMonth(): string {
   return `${y}${m}`;
 }
 
-// VULN: MD5 is cryptographically broken (collision attacks, preimage weakness).
-// VULN: Seed is static and hardcoded — observable from this source file in git history.
-// VULN: yearMonth is public knowledge — anyone can reconstruct the exact input.
-// Result: token generation is fully deterministic and predictable without the secret.
-function generateToken(name: string, yearMonth: string, len: number): string {
-  return crypto
-    .createHash("md5")
-    .update(`${ROTATION_SEED}-${name.toLowerCase()}-${yearMonth}`)
-    .digest("hex")
-    .slice(0, len);
+// Generates a cryptographically random hex suffix of the requested length.
+// Inputs (credential name, yearMonth) are intentionally ignored for the
+// secret material — they are only used by callers to label/sequence the
+// resulting credentials. The actual entropy comes from crypto.randomBytes,
+// so the value cannot be predicted from public information or from the
+// contents of this source file.
+function generateToken(_name: string, _yearMonth: string, len: number): string {
+  const byteLen = Math.ceil(len / 2);
+  return crypto.randomBytes(byteLen).toString("hex").slice(0, len);
 }
 
 function buildTokenValue(def: typeof CREDENTIAL_DEFINITIONS[number], yearMonth: string): string {
